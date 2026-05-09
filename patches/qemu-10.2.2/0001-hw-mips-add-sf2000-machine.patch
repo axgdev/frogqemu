@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,651 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -151,6 +151,7 @@
 +static qemu_irq sf2000_eirq3;
 +static uint32_t sf2000_timer5_aim;
 +static uint32_t sf2000_timer5_ctrl;
++static int64_t sf2000_next_tick_ns;
 +
 +static uint32_t sf2000_timer_ticks(void)
 +{
@@ -160,13 +161,39 @@
 +static bool sf2000_timer5_pending(void)
 +{
 +    uint32_t count;
++    uint32_t irq_enable = 0;
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    unsigned i;
 +
-+    if (!(sf2000_timer5_ctrl & BIT(2)) || !(sf2000_timer5_ctrl & BIT(4))) {
++    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++        if (sf2000_regs[i].valid && sf2000_regs[i].addr == SF2000_IRQ_ENABLE1) {
++            irq_enable = sf2000_regs[i].value;
++            break;
++        }
++    }
++
++    if (!(irq_enable & SF2000_SB_TIMER_IRQ)) {
 +        return false;
++    }
++
++    /*
++     * Stock and HCRTOS both route the scheduler through external bank bit 22.
++     * Early stock boot enables that bit before programming TIMER5, then idles
++     * around CP0 Count. Keep a low-rate synthetic tick available as soon as the
++     * bank bit is enabled, and switch to compare-based behavior once TIMER5 is
++     * configured.
++     */
++    if (!(sf2000_timer5_ctrl & BIT(2)) || !(sf2000_timer5_ctrl & BIT(4))) {
++        return now >= sf2000_next_tick_ns;
 +    }
 +
 +    count = sf2000_timer_ticks();
 +    return count - sf2000_timer5_aim < 0x80000000u;
++}
++
++static void sf2000_timer_ack(void)
++{
++    sf2000_next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 20;
 +}
 +
 +static void sf2000_update_irq(void)
@@ -202,6 +229,13 @@
 +        value = sf2000_timer5_aim;
 +    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
 +        value = sf2000_timer5_ctrl;
++        if (sf2000_timer5_pending()) {
++            value |= BIT(3);
++        }
++    } else if (full_addr >= SF2000_TIMER_BASE &&
++               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
++               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8) {
++        value = 0;
 +        if (sf2000_timer5_pending()) {
 +            value |= BIT(3);
 +        }
@@ -273,6 +307,14 @@
 +        sf2000_timer5_aim = value;
 +    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
 +        sf2000_timer5_ctrl = value & ~(uint32_t)BIT(3);
++        if (value & BIT(3)) {
++            sf2000_timer_ack();
++        }
++    } else if (full_addr >= SF2000_TIMER_BASE &&
++               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
++               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8 &&
++               (value & BIT(3))) {
++        sf2000_timer_ack();
 +    }
 +
 +    sf2000_update_irq();
@@ -586,6 +628,7 @@
 +    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
 +    cpu_mips_irq_init_cpu(cpu);
 +    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];
++    sf2000_timer_ack();
 +    cpu_mips_clock_init(cpu);
 +    qemu_register_reset(sf2000_cpu_reset, cpu);
 +
