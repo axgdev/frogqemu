@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1087 @@
+@@ -0,0 +1,1120 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -50,6 +50,8 @@
 +#include "qemu/error-report.h"
 +#include "qemu/log.h"
 +#include "qemu/module.h"
++#include "system/block-backend.h"
++#include "system/blockdev.h"
 +#include "system/reset.h"
 +#include "system/dma.h"
 +#include "qom/object.h"
@@ -185,6 +187,7 @@
 +static bool sf2000_sdio_xfer_done;
 +static bool sf2000_sdio_irq_pending;
 +static bool sf2000_sdio_callback_pending;
++static BlockBackend *sf2000_sdio_blk;
 +static char sf2000_uart_line[256];
 +static uint32_t sf2000_uart_line_len;
 +
@@ -305,25 +308,46 @@
 +    sector[511] = 0xaa;
 +}
 +
++static bool sf2000_sdio_read_sector(uint32_t lba, uint8_t sector[512])
++{
++    int ret;
++
++    if (!sf2000_sdio_blk) {
++        sf2000_sdio_fill_sector(lba, sector);
++        return false;
++    }
++
++    ret = blk_pread(sf2000_sdio_blk, (int64_t)lba * 512, 512, sector, 0);
++    if (ret < 0) {
++        sf2000_sdio_fill_sector(lba, sector);
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: sdio-read-image-fallback lba=%u ret=%d\n",
++                      lba, ret);
++        return false;
++    }
++    return true;
++}
++
 +static void sf2000_sdio_dma_read(uint32_t lba)
 +{
 +    uint8_t sector[512];
 +    MemTxResult result;
 +    uint32_t len = sf2000_sdio_dma_len ? sf2000_sdio_dma_len : 512;
++    bool image_backed;
 +
 +    if (len > sizeof(sector)) {
 +        len = sizeof(sector);
 +    }
 +
-+    sf2000_sdio_fill_sector(lba, sector);
++    image_backed = sf2000_sdio_read_sector(lba, sector);
 +    result = dma_memory_write(&address_space_memory, sf2000_sdio_dma_addr,
 +                              sector, len, MEMTXATTRS_UNSPECIFIED);
 +    sf2000_sdio_xfer_done = true;
 +    sf2000_sdio_irq_pending = true;
 +    sf2000_sdio_callback_pending = true;
 +    qemu_log_mask(LOG_UNIMP,
-+                  "sf2000: sdio-dma-read lba=%u dst=0x%08x len=%u result=%d\n",
-+                  lba, sf2000_sdio_dma_addr, len, result);
++                  "sf2000: sdio-dma-read lba=%u dst=0x%08x len=%u image=%d result=%d\n",
++                  lba, sf2000_sdio_dma_addr, len, image_backed, result);
 +}
 +
 +static void sf2000_sdio_complete_cmd(void)
@@ -1053,6 +1077,7 @@
 +    Clock *cpuclk;
 +    MIPSCPU *cpu;
 +    DeviceState *lcd;
++    DriveInfo *dinfo;
 +
 +    if (machine->ram_size == 0) {
 +        machine->ram_size = SF2000_RAM_DEFAULT;
@@ -1079,6 +1104,14 @@
 +    lcd = qdev_new(TYPE_SF2000_LCD);
 +    sysbus_realize_and_unref(SYS_BUS_DEVICE(lcd), &error_fatal);
 +    sysbus_mmio_map(SYS_BUS_DEVICE(lcd), 0, SF2000_LCD_MMIO_BASE);
++
++    dinfo = drive_get(IF_SD, 0, 0);
++    if (dinfo) {
++        sf2000_sdio_blk = blk_by_legacy_dinfo(dinfo);
++        info_report("sf2000: using SD image '%s'", blk_name(sf2000_sdio_blk));
++    } else {
++        info_report("sf2000: no SD image supplied; using synthetic FAT probe media");
++    }
 +
 +    sf2000_load_bootrom(machine, sysmem);
 +    sf2000_load_asd(machine);
