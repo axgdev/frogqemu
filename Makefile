@@ -9,8 +9,10 @@ ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
+SD_IMAGE ?=
+SD_ARGS = $(if $(SD_IMAGE),-drive if=sd,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd smoke-stock-fatfs clean distclean
 
 all: build
 
@@ -21,7 +23,9 @@ help:
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
+		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
+		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
 		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
 		'  make debug         run paused with GDB stub on :1234' \
 		'  make gdb           connect mipsel-mti-elf-gdb to :1234' \
@@ -70,27 +74,27 @@ $(QEMU_BIN): $(QEMU_SRC)/build/build.ninja
 
 run-vnc: build
 	mkdir -p $(dir $(LOG))
-	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
 run-headless: build
 	mkdir -p $(dir $(LOG))
-	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
 		-display none -serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
 boot-stock-asd: build
 	mkdir -p $(dir $(LOG))
-	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) $(SD_ARGS) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
 debug: build
 	mkdir -p $(dir $(LOG))
-	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) $(SD_ARGS) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-S -s -d in_asm,cpu,guest_errors,unimp -D $(LOG)
@@ -115,6 +119,15 @@ smoke-stock-asd: build
 		> build/logs/smoke-stock-asd.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-asd.console
 	grep -q 'addr=0x18800002.*value=0x00001512' build/logs/smoke-stock-asd.log
+
+smoke-stock-fatfs: build
+	mkdir -p build/logs
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-fatfs.log \
+		> build/logs/smoke-stock-fatfs.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-fatfs.console
+	grep -q 'uart: \[FS\]successed!' build/logs/smoke-stock-fatfs.log
 
 clean:
 	rm -rf $(QEMU_SRC)/build

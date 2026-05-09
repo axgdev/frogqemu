@@ -57,7 +57,12 @@ Run the current direct stock ASD bring-up smoke with:
 
 ```sh
 make smoke-stock-asd
+make smoke-stock-fatfs
 ```
+
+`make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
+DMA read path and confirm that the stock firmware reaches its FatFs mount
+success message.
 
 ## Run With VNC
 
@@ -79,6 +84,15 @@ vnc://host:5901
 ```
 
 Logs are written to `build/logs/sf2000.log`.
+
+Without `SD_IMAGE`, the SD controller serves a tiny synthetic FAT32-like probe
+card that is enough for the stock firmware to mount. To attach a real raw SD
+image:
+
+```sh
+make run-vnc SD_IMAGE=/path/to/sd.img
+make boot-stock-asd SD_IMAGE=/path/to/sd.img
+```
 
 ## Debug
 
@@ -114,12 +128,17 @@ Implemented:
   with entry `0x80001000`.
 - Permissive MMIO logging from `0x10000000` to before the boot flash window.
 - A minimal RGB565 framebuffer console block at `0x18000000`.
+- Early system register defaults for chip ID, clocks, pinmux, and PLL probing.
+- A minimal timer/interrupt path sufficient for the stock ASD scheduler loop.
+- UART line capture to the QEMU log.
+- A minimal SDIO command and DMA read path, backed by either a raw `IF_SD`
+  image or a synthetic FAT probe card.
 
 Not implemented yet:
 
-- Real HC15xx display controller registers.
-- Timers, interrupt controller, GPIO, keys, SD controller, SPI/NAND layout, and
-  audio.
+- A complete HC15xx display controller and panel model.
+- GPIO keys, audio, SPI/NAND layout, writes to SD media, and full controller
+  timing semantics.
 - ASD package loading.
 
 The first practical milestone is to run stock firmware far enough to collect

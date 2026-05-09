@@ -18,7 +18,10 @@ Known local firmware files:
 /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 ```
 
-The current machine only consumes the SPI boot image through `-bios`.
+The current machine consumes the SPI boot image through `-bios` and can inject
+the stock ASD directly with `-kernel` for faster bring-up. SD reads use the
+QEMU `IF_SD` block backend when `SD_IMAGE=/path/to/sd.img` is passed through
+the Makefile, otherwise the board serves a synthetic FAT probe card.
 
 ## Reverse Engineering Loop
 
