@@ -5,11 +5,12 @@ QEMU_SRC := .cache/qemu-$(QEMU_VERSION)
 QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
 
 FIRMWARE ?= /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless debug smoke clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd clean distclean
 
 all: build
 
@@ -19,7 +20,9 @@ help:
 		'  make deps          show required Alpine packages' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
+		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
+		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
 		'  make debug         run paused with GDB stub on :1234' \
 		'  make gdb           connect mipsel-mti-elf-gdb to :1234' \
 		'  make clean         remove QEMU build directory only' \
@@ -42,7 +45,7 @@ $(QEMU_SRC)/.fetched:
 patch: $(QEMU_SRC)/.patched
 
 $(QEMU_SRC)/.patched: $(QEMU_SRC)/.fetched patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch
-	cd $(QEMU_SRC) && patch -p1 < ../../patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch
+	cd $(QEMU_SRC) && { test -f hw/mips/sf2000.c || patch -p1 < ../../patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch; }
 	touch $@
 
 configure: $(QEMU_SRC)/build/build.ninja
@@ -78,9 +81,16 @@ run-headless: build
 		-display none -serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
+boot-stock-asd: build
+	mkdir -p $(dir $(LOG))
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+		-display vnc=$(VNC) \
+		-serial none -monitor stdio \
+		-d guest_errors,unimp -D $(LOG)
+
 debug: build
 	mkdir -p $(dir $(LOG))
-	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-S -s -d in_asm,cpu,guest_errors,unimp -D $(LOG)
@@ -96,6 +106,15 @@ smoke: build
 		-d guest_errors,unimp -D build/logs/smoke.log \
 		> build/logs/smoke.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded' build/logs/smoke.console
+
+smoke-stock-asd: build
+	mkdir -p build/logs
+	timeout 3s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-asd.log \
+		> build/logs/smoke-stock-asd.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-asd.console
+	grep -q 'addr=0x18800002.*value=0x00003503' build/logs/smoke-stock-asd.log
 
 clean:
 	rm -rf $(QEMU_SRC)/build

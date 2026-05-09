@@ -47,6 +47,18 @@ Override it with:
 make smoke FIRMWARE=/path/to/firmware.bin
 ```
 
+The stock ASD path defaults to:
+
+```sh
+/root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
+```
+
+Run the current direct stock ASD bring-up smoke with:
+
+```sh
+make smoke-stock-asd
+```
+
 ## Run With VNC
 
 ```sh
@@ -95,9 +107,11 @@ si
 Implemented:
 
 - MIPS little-endian `24Kc` CPU model with a 396 MHz reference clock.
-- 64 MiB RAM at physical `0x00000000`.
+- 128 MiB RAM at physical `0x00000000`.
 - Boot flash image at physical `0x1fc00000`, matching the MIPS reset alias at
   virtual `0xbfc00000`.
+- Direct ASD bring-up mode through `-kernel`, loaded at physical `0x00000000`
+  with entry `0x80001000`.
 - Permissive MMIO logging from `0x10000000` to before the boot flash window.
 - A minimal RGB565 framebuffer console block at `0x18000000`.
 
@@ -110,3 +124,6 @@ Not implemented yet:
 
 The first practical milestone is to run stock firmware far enough to collect
 unknown MMIO accesses and map them back to the real SF2000 drivers.
+
+See [docs/SF2000.md](docs/SF2000.md) for the boot-chain and address-map details
+that are easy to get wrong.
