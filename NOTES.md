@@ -1,0 +1,33 @@
+# Bring-Up Notes
+
+## Why QEMU
+
+QEMU gives the best path to running stock firmware because it already has MIPS
+TCG, remote GDB, VNC, monitor commands, and a maintainable device model API.
+Unicorn is useful for narrow CPU-only traces, but it does not provide the full
+machine framework needed to boot firmware with display, storage, timers, and
+interrupts.
+
+## Firmware Inputs
+
+Known local firmware files:
+
+```text
+/root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+/root/host-frogdev/universal/orig_firmware/UpdateFirmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+/root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
+```
+
+The current machine only consumes the SPI boot image through `-bios`.
+
+## Reverse Engineering Loop
+
+1. Run with `make debug`.
+2. Connect with `make gdb`.
+3. Let firmware execute until it hits unknown MMIO.
+4. Inspect `build/logs/sf2000.log`.
+5. Add a small device stub for the observed register block.
+6. Repeat.
+
+Keep stubs permissive at first: return stable values and log writes. Tighten
+behavior only when the firmware needs it.
