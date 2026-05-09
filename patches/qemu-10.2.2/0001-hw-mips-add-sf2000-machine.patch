@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1281 @@
+@@ -0,0 +1,1350 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -86,7 +86,14 @@
 +#define SF2000_TIMER_SIZE      0x00000080ULL
 +#define SF2000_IRQ_STATUS1     0x18800030ULL
 +#define SF2000_IRQ_ENABLE1     0x18800038ULL
-+#define SF2000_TIMER5_BASE     0x18818a50ULL
++#define SF2000_TIMER_COUNT     8
++#define SF2000_TIMER_STEP      0x10
++#define SF2000_TIMER_CTRL_EN   BIT(2)
++#define SF2000_TIMER_CTRL_INT  BIT(3)
++#define SF2000_TIMER_CTRL_IEN  BIT(4)
++#define SF2000_TIMER5_INDEX    5
++#define SF2000_TIMER5_BASE     (SF2000_TIMER_BASE + \
++                                SF2000_TIMER5_INDEX * SF2000_TIMER_STEP)
 +#define SF2000_SB_TIMER_BIT    22
 +#define SF2000_SB_TIMER_IRQ    (1u << SF2000_SB_TIMER_BIT)
 +#define SF2000_SDIO_IRQ_BIT    10
@@ -179,8 +186,9 @@
 +
 +static SF2000RegState sf2000_regs[256];
 +static qemu_irq sf2000_eirq3;
-+static uint32_t sf2000_timer5_aim;
-+static uint32_t sf2000_timer5_ctrl;
++static uint32_t sf2000_timer_cnt[SF2000_TIMER_COUNT];
++static uint32_t sf2000_timer_aim[SF2000_TIMER_COUNT];
++static uint32_t sf2000_timer_ctrl[SF2000_TIMER_COUNT];
 +static int64_t sf2000_next_tick_ns;
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
 +static bool sf2000_bootrom_ram_entry;
@@ -201,6 +209,28 @@
 +static uint32_t sf2000_timer_ticks(void)
 +{
 +    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000);
++}
++
++static bool sf2000_timer_decode(hwaddr full_addr, unsigned *index,
++                                unsigned *offset)
++{
++    hwaddr timer_off;
++
++    if (full_addr < SF2000_TIMER_BASE ||
++        full_addr >= SF2000_TIMER_BASE + SF2000_TIMER_SIZE) {
++        return false;
++    }
++
++    timer_off = full_addr - SF2000_TIMER_BASE;
++    *index = timer_off / SF2000_TIMER_STEP;
++    *offset = timer_off % SF2000_TIMER_STEP;
++    return *index < SF2000_TIMER_COUNT;
++}
++
++static bool sf2000_timer5_configured(void)
++{
++    return (sf2000_timer_ctrl[SF2000_TIMER5_INDEX] & SF2000_TIMER_CTRL_EN) &&
++           (sf2000_timer_ctrl[SF2000_TIMER5_INDEX] & SF2000_TIMER_CTRL_IEN);
 +}
 +
 +static bool sf2000_timer5_pending(void)
@@ -228,17 +258,18 @@
 +     * bank bit is enabled, and switch to compare-based behavior once TIMER5 is
 +     * configured.
 +     */
-+    if (!(sf2000_timer5_ctrl & BIT(2)) || !(sf2000_timer5_ctrl & BIT(4))) {
++    if (!sf2000_timer5_configured()) {
 +        return now >= sf2000_next_tick_ns;
 +    }
 +
 +    count = sf2000_timer_ticks();
-+    return count - sf2000_timer5_aim < 0x80000000u;
++    return count - sf2000_timer_aim[SF2000_TIMER5_INDEX] < 0x80000000u;
 +}
 +
 +static void sf2000_timer_ack(void)
 +{
 +    sf2000_next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 20;
++    sf2000_timer_ctrl[SF2000_TIMER5_INDEX] &= ~SF2000_TIMER_CTRL_INT;
 +}
 +
 +static void sf2000_update_irq(void)
@@ -574,6 +605,8 @@
 +{
 +    hwaddr full_addr = SF2000_MMIO_BASE + addr;
 +    uint64_t value = 0;
++    unsigned timer_index;
++    unsigned timer_offset;
 +    unsigned i;
 +
 +    if (full_addr == SF2000_IRQ_STATUS1) {
@@ -598,36 +631,37 @@
 +                (sf2000_sdio_xfer_busy ? 0x21 : 0x20);
 +    } else if (full_addr == SF2000_TIMER_BASE + 0x08 &&
 +               sf2000_sdio_callback_pending) {
-+        value = BIT(3);
++        value = sf2000_timer_ctrl[0] | SF2000_TIMER_CTRL_INT;
 +    } else if (full_addr == SF2000_TIMER_BASE + 0x18 &&
 +               sf2000_sdio_callback_pending) {
-+        value = BIT(3);
++        value = sf2000_timer_ctrl[1] | SF2000_TIMER_CTRL_INT;
 +    } else if (full_addr == 0x1880f04b) {
 +        value = 0; /* AUX controller command/status idle. */
 +    } else if (full_addr == 0x1882e09a) {
 +        value = 0x40; /* SFLASH RX ready. */
 +    } else if (full_addr == 0x1882e0a0) {
 +        value = 0x00000001; /* SFLASH DMA/PIO completion. */
-+    } else if (full_addr == SF2000_TIMER5_BASE) {
-+        value = sf2000_timer_ticks();
-+    } else if (full_addr == SF2000_TIMER5_BASE + 4) {
-+        value = sf2000_timer5_aim;
-+    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
-+        value = sf2000_timer5_ctrl;
-+        if (sf2000_timer5_pending()) {
-+            value |= BIT(3);
++    } else if (sf2000_timer_decode(full_addr, &timer_index, &timer_offset)) {
++        switch (timer_offset) {
++        case 0:
++            value = sf2000_timer_ticks() + sf2000_timer_cnt[timer_index];
++            break;
++        case 4:
++            value = sf2000_timer_aim[timer_index];
++            break;
++        case 8:
++            value = sf2000_timer_ctrl[timer_index];
++            if (sf2000_timer5_pending()) {
++                value |= SF2000_TIMER_CTRL_INT;
++            }
++            break;
++        case 12:
++            value = sf2000_timer_ticks() / 1000000u;
++            break;
++        default:
++            value = 0;
++            break;
 +        }
-+    } else if (full_addr >= SF2000_TIMER_BASE &&
-+               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
-+               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8) {
-+        value = 0;
-+        if (sf2000_timer5_pending()) {
-+            value |= BIT(3);
-+        }
-+    } else if (full_addr >= SF2000_TIMER_BASE &&
-+               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
-+               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 0) {
-+        value = sf2000_timer_ticks();
 +    } else {
 +        for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
 +            if (sf2000_regs[i].valid &&
@@ -666,6 +700,8 @@
 +    uint32_t mask = size >= 4 ? 0xffffffffu : ((1u << (size * 8)) - 1u);
 +    unsigned shift = (full_addr & 3u) * 8u;
 +    unsigned empty = ARRAY_SIZE(sf2000_regs);
++    unsigned timer_index;
++    unsigned timer_offset;
 +    unsigned i;
 +
 +    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -688,24 +724,28 @@
 +                               (((uint32_t)value << shift) & mask);
 +    }
 +
-+    if (full_addr == SF2000_TIMER5_BASE + 4) {
-+        sf2000_timer5_aim = value;
-+    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
-+        sf2000_timer5_ctrl = value & ~(uint32_t)BIT(3);
-+        if (value & BIT(3)) {
-+            sf2000_timer_ack();
++    if (sf2000_timer_decode(full_addr, &timer_index, &timer_offset)) {
++        switch (timer_offset) {
++        case 0:
++            sf2000_timer_cnt[timer_index] = value - sf2000_timer_ticks();
++            break;
++        case 4:
++            sf2000_timer_aim[timer_index] = value;
++            break;
++        case 8:
++            sf2000_timer_ctrl[timer_index] = value & ~SF2000_TIMER_CTRL_INT;
++            if (value & SF2000_TIMER_CTRL_INT) {
++                if (timer_index == 0 || timer_index == 1) {
++                    sf2000_sdio_callback_pending = false;
++                }
++                sf2000_timer_ack();
++            }
++            break;
++        default:
++            break;
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
 +        sf2000_sdio_irq_pending = false;
-+    } else if (full_addr >= SF2000_TIMER_BASE &&
-+               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
-+               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8 &&
-+               (value & BIT(3))) {
-+        if (full_addr == SF2000_TIMER_BASE + 0x08 ||
-+            full_addr == SF2000_TIMER_BASE + 0x18) {
-+            sf2000_sdio_callback_pending = false;
-+        }
-+        sf2000_timer_ack();
 +    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
 +    } else if ((full_addr & ~0x80u) == 0x18808304) {
