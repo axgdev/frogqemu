@@ -12,7 +12,7 @@ LOG ?= build/logs/sf2000.log
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=sd,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd smoke-stock-fatfs clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -24,6 +24,7 @@ help:
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
+		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
 		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
 		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
@@ -128,6 +129,16 @@ smoke-stock-fatfs: build
 		> build/logs/smoke-stock-fatfs.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-fatfs.console
 	grep -q 'uart: \[FS\]successed!' build/logs/smoke-stock-fatfs.log
+
+smoke-stock-display: build
+	mkdir -p build/logs
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-display.log \
+		> build/logs/smoke-stock-display.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-display.console
+	grep -q 'gma-present .*mode=12' build/logs/smoke-stock-display.log
+	grep -q 'gma-present .*mode=6' build/logs/smoke-stock-display.log
 
 clean:
 	rm -rf $(QEMU_SRC)/build

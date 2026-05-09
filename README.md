@@ -58,11 +58,17 @@ Run the current direct stock ASD bring-up smoke with:
 ```sh
 make smoke-stock-asd
 make smoke-stock-fatfs
+make smoke-stock-display
 ```
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount
 success message.
+
+`make smoke-stock-display` checks that the stock ASD reaches the HC16xx GMA
+scanout path and emits both the CLUT8 splash/menu descriptor and later RGB565
+framebuffer descriptor. The emulator currently bridges the ST7789 panel init
+sequence to QEMU display output by decoding those GMA descriptor writes.
 
 ## Run With VNC
 

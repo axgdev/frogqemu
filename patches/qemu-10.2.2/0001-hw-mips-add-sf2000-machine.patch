@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1120 @@
+@@ -0,0 +1,1260 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -160,6 +160,7 @@
 +
 +static SF2000LCDState *sf2000_lcd;
 +static uint32_t sf2000_rgb565_to_surface(uint16_t pix);
++static void sf2000_gma_present(uint32_t dmba_addr);
 +
 +static struct {
 +    const char *kernel_filename;
@@ -686,6 +687,8 @@
 +        sf2000_timer_ack();
 +    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
++    } else if ((full_addr & ~0x80u) == 0x18808304) {
++        sf2000_gma_present(value);
 +    } else if (full_addr == SF2000_UART1_BASE) {
 +        sf2000_uart_put(value & 0xff);
 +    } else if (full_addr == 0x1882e098) {
@@ -786,6 +789,143 @@
 +    g = (g << 2) | (g >> 4);
 +    b = (b << 3) | (b >> 2);
 +    return 0xff000000u | (r << 16) | (g << 8) | b;
++}
++
++static uint32_t sf2000_argb8888_to_surface(uint32_t pix)
++{
++    return 0xff000000u | (pix & 0x00ffffffu);
++}
++
++static void sf2000_gma_present(uint32_t dmba_addr)
++{
++    SF2000LCDState *s = sf2000_lcd;
++    DisplaySurface *surface;
++    uint8_t header[40];
++    uint8_t *linebuf;
++    uint8_t palette[1024];
++    bool have_palette = false;
++    uint32_t d0, d1, d2, d3, d4, d5, d7;
++    uint32_t mode, clut_update, sx, ex, sy, ey, src_w, src_h, pitch;
++    uint32_t width, height, bpp;
++    int y;
++
++    if (!s || !dmba_addr) {
++        return;
++    }
++    if (address_space_read(&address_space_memory, dmba_addr,
++                           MEMTXATTRS_UNSPECIFIED, header,
++                           sizeof(header)) != MEMTX_OK) {
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: gma-present header-read-failed dmba=0x%08x\n",
++                      dmba_addr);
++        return;
++    }
++
++    d0 = ldl_le_p(header + 0);
++    d1 = ldl_le_p(header + 4);
++    d2 = ldl_le_p(header + 8);
++    d3 = ldl_le_p(header + 12);
++    d4 = ldl_le_p(header + 16);
++    d5 = ldl_le_p(header + 20);
++    d7 = ldl_le_p(header + 28);
++
++    mode = (d0 >> 4) & 0xf;
++    clut_update = (d0 >> 10) & 1;
++    sx = d2 & 0xfff;
++    ex = (d2 >> 16) & 0x1fff;
++    sy = d3 & 0xfff;
++    ey = (d3 >> 16) & 0xfff;
++    src_w = d4 & 0xfff;
++    src_h = (d4 >> 16) & 0xfff;
++    pitch = (d5 >> 16) & 0x3fff;
++
++    if (ex < sx || ey < sy || sx >= SF2000_LCD_WIDTH ||
++        sy >= SF2000_LCD_HEIGHT || !d7) {
++        return;
++    }
++
++    width = MIN(ex - sx + 1, (uint32_t)SF2000_LCD_WIDTH - sx);
++    height = MIN(ey - sy + 1, (uint32_t)SF2000_LCD_HEIGHT - sy);
++    if (src_w && width > src_w) {
++        width = src_w;
++    }
++    if (src_h && height > src_h) {
++        height = src_h;
++    }
++
++    switch (mode) {
++    case 0x01: /* ARGB8888 */
++        bpp = 4;
++        break;
++    case 0x06: /* RGB565 */
++        bpp = 2;
++        break;
++    case 0x0c: /* CLUT8 */
++        bpp = 1;
++        if (clut_update && d1 &&
++            address_space_read(&address_space_memory, d1,
++                               MEMTXATTRS_UNSPECIFIED, palette,
++                               sizeof(palette)) == MEMTX_OK) {
++            have_palette = true;
++        }
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: gma-present unsupported mode=%u dmba=0x%08x bitmap=0x%08x\n",
++                      mode, dmba_addr, d7);
++        return;
++    }
++
++    if (!pitch) {
++        pitch = width * bpp;
++    }
++    if (pitch < width * bpp) {
++        return;
++    }
++
++    surface = qemu_console_surface(s->con);
++    if (surface_bits_per_pixel(surface) != 32 ||
++        surface_width(surface) != SF2000_LCD_WIDTH ||
++        surface_height(surface) != SF2000_LCD_HEIGHT) {
++        qemu_console_resize(s->con, SF2000_LCD_WIDTH, SF2000_LCD_HEIGHT);
++        surface = qemu_console_surface(s->con);
++    }
++    if (surface_bits_per_pixel(surface) != 32) {
++        return;
++    }
++
++    linebuf = g_malloc(pitch);
++    for (y = 0; y < height; y++) {
++        uint32_t *dst = (uint32_t *)(surface_data(surface) +
++                        (sy + y) * surface_stride(surface)) + sx;
++        int x;
++
++        if (address_space_read(&address_space_memory, d7 + (uint64_t)y * pitch,
++                               MEMTXATTRS_UNSPECIFIED, linebuf,
++                               pitch) != MEMTX_OK) {
++            break;
++        }
++        for (x = 0; x < width; x++) {
++            if (mode == 0x06) {
++                dst[x] = sf2000_rgb565_to_surface(lduw_le_p(linebuf + x * 2));
++            } else if (mode == 0x01) {
++                dst[x] = sf2000_argb8888_to_surface(ldl_le_p(linebuf + x * 4));
++            } else if (have_palette) {
++                dst[x] = sf2000_argb8888_to_surface(
++                    ldl_le_p(palette + linebuf[x] * 4));
++            } else {
++                uint8_t c = linebuf[x];
++                dst[x] = 0xff000000u | (c << 16) | (c << 8) | c;
++            }
++        }
++    }
++    g_free(linebuf);
++
++    dpy_gfx_update(s->con, sx, sy, width, height);
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u\n",
++                  dmba_addr, d7, mode, sx, sy, width, height, pitch,
++                  have_palette);
 +}
 +
 +static void sf2000_lcd_update(void *opaque)
