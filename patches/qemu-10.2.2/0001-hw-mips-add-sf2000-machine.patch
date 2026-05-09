@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1477 @@
+@@ -0,0 +1,1525 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -511,6 +511,50 @@
 +                  image_backed, result);
 +}
 +
++static void sf2000_sdio_dma_write(uint32_t lba)
++{
++    uint8_t sector[512];
++    MemTxResult dma_result = MEMTX_OK;
++    int blk_result = 0;
++    uint32_t len = sf2000_sdio_dma_len ? sf2000_sdio_dma_len : 512;
++    uint32_t copied = 0;
++    uint32_t sectors = (len + sizeof(sector) - 1) / sizeof(sector);
++    bool image_backed = sf2000_sdio_blk != NULL;
++    uint32_t i;
++
++    for (i = 0; i < sectors; i++) {
++        uint32_t chunk = len - copied;
++
++        if (chunk > sizeof(sector)) {
++            chunk = sizeof(sector);
++        }
++        memset(sector, 0, sizeof(sector));
++        dma_result = dma_memory_read(&address_space_memory,
++                                     sf2000_sdio_dma_addr + copied,
++                                     sector, chunk, MEMTXATTRS_UNSPECIFIED);
++        if (dma_result != MEMTX_OK) {
++            break;
++        }
++        if (sf2000_sdio_blk) {
++            blk_result = blk_pwrite(sf2000_sdio_blk, (int64_t)(lba + i) * 512,
++                                    512, sector, 0);
++            if (blk_result < 0) {
++                break;
++            }
++        }
++        copied += chunk;
++    }
++
++    sf2000_sdio_xfer_done = true;
++    sf2000_sdio_xfer_busy = false;
++    sf2000_sdio_irq_pending = true;
++    sf2000_sdio_callback_pending = true;
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: sdio-dma-write lba=%u sectors=%u src=0x%08x len=%u copied=%u image=%d dma=%d blk=%d\n",
++                  lba, sectors, sf2000_sdio_dma_addr, len, copied,
++                  image_backed, dma_result, blk_result);
++}
++
 +static void sf2000_sdio_complete_cmd(void)
 +{
 +    sf2000_sdio_resp[0] = 0;
@@ -559,7 +603,11 @@
 +        sf2000_sdio_resp[0] = 0;
 +        break;
 +    case 24:
++        sf2000_sdio_dma_write(sf2000_sdio_arg >> 9);
++        sf2000_sdio_resp[0] = 0;
++        break;
 +    case 25:
++        sf2000_sdio_dma_write(sf2000_sdio_arg >> 9);
 +        sf2000_sdio_resp[0] = 0;
 +        break;
 +    default:
