@@ -95,6 +95,14 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +    uint64_t kernel_entry;
 +} loaderparams;
 +
++typedef struct SF2000RegState {
++    hwaddr addr;
++    uint32_t value;
++    bool valid;
++} SF2000RegState;
++
++static SF2000RegState sf2000_regs[256];
++
 +static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
 +                            unsigned size)
 +{
@@ -107,6 +115,7 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +{
 +    hwaddr full_addr = SF2000_MMIO_BASE + addr;
 +    uint64_t value = 0;
++    unsigned i;
 +
 +    switch (full_addr) {
 +    case 0x18800000:
@@ -116,6 +125,16 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +        value = SF2000_HC15XX_CHIP_ID;
 +        break;
 +    default:
++        for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++            if (sf2000_regs[i].valid &&
++                sf2000_regs[i].addr == (full_addr & ~3u)) {
++                value = sf2000_regs[i].value >> ((full_addr & 3u) * 8u);
++                if (size < 4) {
++                    value &= (1u << (size * 8)) - 1u;
++                }
++                break;
++            }
++        }
 +        break;
 +    }
 +
@@ -126,7 +145,34 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
 +                               unsigned size)
 +{
-+    sf2000_log_mmio("mmio-write", SF2000_MMIO_BASE + addr, value, size);
++    hwaddr full_addr = SF2000_MMIO_BASE + addr;
++    uint32_t old_value = 0;
++    uint32_t mask = size >= 4 ? 0xffffffffu : ((1u << (size * 8)) - 1u);
++    unsigned shift = (full_addr & 3u) * 8u;
++    unsigned empty = ARRAY_SIZE(sf2000_regs);
++    unsigned i;
++
++    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++        if (sf2000_regs[i].valid && sf2000_regs[i].addr == (full_addr & ~3u)) {
++            old_value = sf2000_regs[i].value;
++            break;
++        }
++        if (!sf2000_regs[i].valid && empty == ARRAY_SIZE(sf2000_regs)) {
++            empty = i;
++        }
++    }
++    if (i == ARRAY_SIZE(sf2000_regs) && empty != ARRAY_SIZE(sf2000_regs)) {
++        i = empty;
++        sf2000_regs[i].addr = full_addr & ~3u;
++        sf2000_regs[i].valid = true;
++    }
++    if (i != ARRAY_SIZE(sf2000_regs)) {
++        mask <<= shift;
++        sf2000_regs[i].value = (old_value & ~mask) |
++                               (((uint32_t)value << shift) & mask);
++    }
++
++    sf2000_log_mmio("mmio-write", full_addr, value, size);
 +}
 +
 +static const MemoryRegionOps sf2000_unimp_ops = {
