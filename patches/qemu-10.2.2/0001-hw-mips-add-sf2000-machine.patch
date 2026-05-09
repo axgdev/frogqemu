@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,888 @@
+@@ -0,0 +1,976 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -174,6 +174,11 @@
 +static int64_t sf2000_next_tick_ns;
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
 +static uint8_t sf2000_sflash_cmd;
++static uint32_t sf2000_sdio_arg;
++static uint8_t sf2000_sdio_cmd;
++static uint32_t sf2000_sdio_resp[4];
++static char sf2000_uart_line[256];
++static uint32_t sf2000_uart_line_len;
 +
 +static uint32_t sf2000_timer_ticks(void)
 +{
@@ -233,6 +238,69 @@
 +    qemu_log_mask(LOG_UNIMP, "sf2000: %s addr=0x%08" HWADDR_PRIx
 +                  " size=%u value=0x%08" PRIx64 "\n",
 +                  kind, addr, size, value);
++}
++
++static void sf2000_uart_put(uint8_t ch)
++{
++    if (ch == '\r') {
++        return;
++    }
++    if (ch == '\n') {
++        sf2000_uart_line[sf2000_uart_line_len] = 0;
++        qemu_log_mask(LOG_UNIMP, "sf2000: uart: %s\n", sf2000_uart_line);
++        sf2000_uart_line_len = 0;
++        return;
++    }
++    if (sf2000_uart_line_len + 1 < sizeof(sf2000_uart_line)) {
++        sf2000_uart_line[sf2000_uart_line_len++] = ch >= 0x20 && ch < 0x7f ?
++                                                   ch : '.';
++    }
++}
++
++static void sf2000_sdio_complete_cmd(void)
++{
++    sf2000_sdio_resp[0] = 0;
++    sf2000_sdio_resp[1] = 0;
++    sf2000_sdio_resp[2] = 0;
++    sf2000_sdio_resp[3] = 0;
++
++    switch (sf2000_sdio_cmd) {
++    case 0:
++        break;
++    case 2:
++        sf2000_sdio_resp[0] = 0x12345678;
++        sf2000_sdio_resp[1] = 0x9abcdef0;
++        sf2000_sdio_resp[2] = 0x00001122;
++        sf2000_sdio_resp[3] = 0x33445566;
++        break;
++    case 3:
++        sf2000_sdio_resp[0] = 0x00000100;
++        break;
++    case 8:
++        sf2000_sdio_resp[0] = 0xaa010000;
++        break;
++    case 9:
++        sf2000_sdio_resp[0] = 0x400e0032;
++        sf2000_sdio_resp[1] = 0x5b590000;
++        sf2000_sdio_resp[2] = 0xedc87f80;
++        sf2000_sdio_resp[3] = 0x0a404000;
++        break;
++    case 41:
++        sf2000_sdio_resp[0] = 0x80ffc000; /* ACMD41 OCR ready, high capacity. */
++        break;
++    case 55:
++        sf2000_sdio_resp[0] = 0x20010000; /* APP_CMD accepted. */
++        break;
++    default:
++        sf2000_sdio_resp[0] = 0x00000900;
++        break;
++    }
++
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: sdio-cmd cmd=%u arg=0x%08x resp=%08x %08x %08x %08x\n",
++                  sf2000_sdio_cmd, sf2000_sdio_arg, sf2000_sdio_resp[0],
++                  sf2000_sdio_resp[1], sf2000_sdio_resp[2],
++                  sf2000_sdio_resp[3]);
 +}
 +
 +static void sf2000_panel_update_rect(SF2000LCDState *s, uint16_t x, uint16_t y)
@@ -381,6 +449,18 @@
 +        value = sf2000_timer5_pending() ? SF2000_SB_TIMER_IRQ : 0;
 +    } else if (full_addr == SF2000_UART1_BASE + 5) {
 +        value = 0x60; /* THR empty + transmitter empty. */
++    } else if (full_addr >= 0x1884c010 && full_addr < 0x1884c020) {
++        unsigned off = full_addr - 0x1884c010;
++        value = sf2000_sdio_resp[off >> 2] >> ((off & 3) * 8);
++        if (size < 4) {
++            value &= (1u << (size * 8)) - 1u;
++        }
++    } else if (full_addr == 0x1884c001) {
++        value = 0; /* SDIO command engine idle. */
++    } else if (full_addr == 0x1884c00b) {
++        value = 0x09; /* SDIO interrupt/status: command complete. */
++    } else if (full_addr == 0x1884c030) {
++        value = 0x20; /* SDIO FIFO/status ready. */
 +    } else if (full_addr == 0x1880f04b) {
 +        value = 0; /* AUX controller command/status idle. */
 +    } else if (full_addr == 0x1882e09a) {
@@ -481,10 +561,18 @@
 +        sf2000_timer_ack();
 +    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
++    } else if (full_addr == SF2000_UART1_BASE) {
++        sf2000_uart_put(value & 0xff);
 +    } else if (full_addr == 0x1882e098) {
 +        sf2000_sflash_cmd = value & 0xff;
 +        qemu_log_mask(LOG_UNIMP, "sf2000: sflash-cmd cmd=0x%02x\n",
 +                      sf2000_sflash_cmd);
++    } else if (full_addr == 0x1884c004) {
++        sf2000_sdio_arg = value;
++    } else if (full_addr == 0x1884c002) {
++        sf2000_sdio_cmd = value & 0x3f;
++    } else if (full_addr == 0x1884c000 && (value & 1)) {
++        sf2000_sdio_complete_cmd();
 +    }
 +
 +    sf2000_update_irq();
