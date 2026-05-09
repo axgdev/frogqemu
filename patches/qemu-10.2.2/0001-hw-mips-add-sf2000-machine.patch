@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,985 @@
+@@ -0,0 +1,1087 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -51,6 +51,7 @@
 +#include "qemu/log.h"
 +#include "qemu/module.h"
 +#include "system/reset.h"
++#include "system/dma.h"
 +#include "qom/object.h"
 +#include "target/mips/internal.h"
 +#include "ui/console.h"
@@ -82,6 +83,8 @@
 +#define SF2000_TIMER5_BASE     0x18818a50ULL
 +#define SF2000_SB_TIMER_BIT    22
 +#define SF2000_SB_TIMER_IRQ    (1u << SF2000_SB_TIMER_BIT)
++#define SF2000_SDIO_IRQ_BIT    10
++#define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
 +#define SF2000_EIRQ3_LINE      3
 +
 +typedef struct SF2000RegDefault {
@@ -177,6 +180,11 @@
 +static uint32_t sf2000_sdio_arg;
 +static uint8_t sf2000_sdio_cmd;
 +static uint32_t sf2000_sdio_resp[4];
++static uint32_t sf2000_sdio_dma_addr;
++static uint32_t sf2000_sdio_dma_len;
++static bool sf2000_sdio_xfer_done;
++static bool sf2000_sdio_irq_pending;
++static bool sf2000_sdio_callback_pending;
 +static char sf2000_uart_line[256];
 +static uint32_t sf2000_uart_line_len;
 +
@@ -257,6 +265,67 @@
 +    }
 +}
 +
++static void sf2000_put_le16(uint8_t *p, uint16_t v)
++{
++    p[0] = v & 0xff;
++    p[1] = v >> 8;
++}
++
++static void sf2000_put_le32(uint8_t *p, uint32_t v)
++{
++    p[0] = v & 0xff;
++    p[1] = (v >> 8) & 0xff;
++    p[2] = (v >> 16) & 0xff;
++    p[3] = v >> 24;
++}
++
++static void sf2000_sdio_fill_sector(uint32_t lba, uint8_t sector[512])
++{
++    memset(sector, 0, 512);
++
++    if (lba == 0) {
++        memcpy(sector + 0x1be, "\x80\x01\x01\x00\x0c\xfe\xff\xff", 8);
++        sf2000_put_le32(sector + 0x1c6, 2048);
++        sf2000_put_le32(sector + 0x1ca, 0x00020000);
++    } else if (lba == 2048) {
++        memcpy(sector, "\xeb\x58\x90MSDOS5.0", 11);
++        sf2000_put_le16(sector + 11, 512);
++        sector[13] = 8;
++        sf2000_put_le16(sector + 14, 32);
++        sector[16] = 2;
++        sf2000_put_le32(sector + 32, 0x00020000);
++        sector[21] = 0xf8;
++        sf2000_put_le32(sector + 36, 128);
++        sf2000_put_le32(sector + 44, 2);
++        sf2000_put_le16(sector + 510, 0xaa55);
++        memcpy(sector + 82, "FAT32   ", 8);
++    }
++
++    sector[510] = 0x55;
++    sector[511] = 0xaa;
++}
++
++static void sf2000_sdio_dma_read(uint32_t lba)
++{
++    uint8_t sector[512];
++    MemTxResult result;
++    uint32_t len = sf2000_sdio_dma_len ? sf2000_sdio_dma_len : 512;
++
++    if (len > sizeof(sector)) {
++        len = sizeof(sector);
++    }
++
++    sf2000_sdio_fill_sector(lba, sector);
++    result = dma_memory_write(&address_space_memory, sf2000_sdio_dma_addr,
++                              sector, len, MEMTXATTRS_UNSPECIFIED);
++    sf2000_sdio_xfer_done = true;
++    sf2000_sdio_irq_pending = true;
++    sf2000_sdio_callback_pending = true;
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: sdio-dma-read lba=%u dst=0x%08x len=%u result=%d\n",
++                  lba, sf2000_sdio_dma_addr, len, result);
++}
++
 +static void sf2000_sdio_complete_cmd(void)
 +{
 +    sf2000_sdio_resp[0] = 0;
@@ -294,8 +363,16 @@
 +        break;
 +    case 7:
 +    case 16:
++        sf2000_sdio_resp[0] = 0;
++        break;
 +    case 17:
++        sf2000_sdio_dma_read(sf2000_sdio_arg >> 9);
++        sf2000_sdio_resp[0] = 0;
++        break;
 +    case 18:
++        sf2000_sdio_dma_read(sf2000_sdio_arg >> 9);
++        sf2000_sdio_resp[0] = 0;
++        break;
 +    case 24:
 +    case 25:
 +        sf2000_sdio_resp[0] = 0;
@@ -456,6 +533,9 @@
 +
 +    if (full_addr == SF2000_IRQ_STATUS1) {
 +        value = sf2000_timer5_pending() ? SF2000_SB_TIMER_IRQ : 0;
++        if (sf2000_sdio_irq_pending) {
++            value |= SF2000_SDIO_IRQ;
++        }
 +    } else if (full_addr == SF2000_UART1_BASE + 5) {
 +        value = 0x60; /* THR empty + transmitter empty. */
 +    } else if (full_addr >= 0x1884c010 && full_addr < 0x1884c020) {
@@ -467,9 +547,15 @@
 +    } else if (full_addr == 0x1884c001) {
 +        value = 0; /* SDIO command engine idle. */
 +    } else if (full_addr == 0x1884c00b) {
-+        value = 0x09; /* SDIO interrupt/status: command complete. */
++        value = sf2000_sdio_xfer_done ? 0x0d : 0x09;
 +    } else if (full_addr == 0x1884c030) {
-+        value = 0x20; /* SDIO FIFO/status ready. */
++        value = sf2000_sdio_xfer_done ? 0x21 : 0x20;
++    } else if (full_addr == SF2000_TIMER_BASE + 0x08 &&
++               sf2000_sdio_callback_pending) {
++        value = BIT(3);
++    } else if (full_addr == SF2000_TIMER_BASE + 0x18 &&
++               sf2000_sdio_callback_pending) {
++        value = BIT(3);
 +    } else if (full_addr == 0x1880f04b) {
 +        value = 0; /* AUX controller command/status idle. */
 +    } else if (full_addr == 0x1882e09a) {
@@ -563,10 +649,16 @@
 +        if (value & BIT(3)) {
 +            sf2000_timer_ack();
 +        }
++    } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
++        sf2000_sdio_irq_pending = false;
 +    } else if (full_addr >= SF2000_TIMER_BASE &&
 +               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
 +               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8 &&
 +               (value & BIT(3))) {
++        if (full_addr == SF2000_TIMER_BASE + 0x08 ||
++            full_addr == SF2000_TIMER_BASE + 0x18) {
++            sf2000_sdio_callback_pending = false;
++        }
 +        sf2000_timer_ack();
 +    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
@@ -580,6 +672,16 @@
 +        sf2000_sdio_arg = value;
 +    } else if (full_addr == 0x1884c002) {
 +        sf2000_sdio_cmd = value & 0x3f;
++    } else if (full_addr == 0x1884c020) {
++        sf2000_sdio_dma_addr = value;
++    } else if (full_addr == 0x1884c028) {
++        sf2000_sdio_dma_len = value;
++    } else if (full_addr == 0x1884c00b && (value & 0x04)) {
++        sf2000_sdio_xfer_done = false;
++        sf2000_sdio_irq_pending = false;
++    } else if (full_addr == 0x1884c030 && (value & 0x20)) {
++        sf2000_sdio_xfer_done = false;
++        sf2000_sdio_irq_pending = false;
 +    } else if (full_addr == 0x1884c000 && (value & 1)) {
 +        sf2000_sdio_complete_cmd();
 +    }
