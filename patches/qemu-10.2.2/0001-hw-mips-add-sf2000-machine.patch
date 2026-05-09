@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1741 @@
+@@ -0,0 +1,1858 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -90,6 +90,12 @@
 +#define SF2000_ASD_SKIP        0x200ULL
 +#define SF2000_ASD_LOAD_BASE   0x00000200ULL
 +#define SF2000_ASD_ENTRY       0x80001000ULL
++#define SF2000_BL_INFO_MAGIC_ADDR 0x00000010ULL
++#define SF2000_BL_INFO_PTR_ADDR   0x00000014ULL
++#define SF2000_BL_INFO_DATA_ADDR  0x00000100ULL
++#define SF2000_BL_INFO_DATA_KSEG1 0xa0000100U
++#define SF2000_BL_INFO_MAGIC      0xabcd5aa5U
++#define SF2000_TVSYS_RGB_LCD      0x16U
 +#define SF2000_MMIO_BASE       0x10000000ULL
 +#define SF2000_MMIO_SIZE       0x0fc00000ULL
 +#define SF2000_LCD_MMIO_BASE   0x18000000ULL
@@ -114,6 +120,7 @@
 +#define SF2000_TIMER_CTRL_EN   BIT(2)
 +#define SF2000_TIMER_CTRL_INT  BIT(3)
 +#define SF2000_TIMER_CTRL_IEN  BIT(4)
++#define SF2000_TIMER_SEC_COUNT 2
 +#define SF2000_TIMER5_INDEX    5
 +#define SF2000_TIMER5_BASE     (SF2000_TIMER_BASE + \
 +                                SF2000_TIMER5_INDEX * SF2000_TIMER_STEP)
@@ -286,6 +293,16 @@
 +    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000);
 +}
 +
++static uint32_t sf2000_timer_ms(void)
++{
++    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000000);
++}
++
++static bool sf2000_timer_is_sec_ms(unsigned index)
++{
++    return index < SF2000_TIMER_SEC_COUNT;
++}
++
 +static bool sf2000_timer_decode(hwaddr full_addr, unsigned *index,
 +                                unsigned *offset)
 +{
@@ -308,21 +325,61 @@
 +           (sf2000_timer_ctrl[SF2000_TIMER5_INDEX] & SF2000_TIMER_CTRL_IEN);
 +}
 +
-+static bool sf2000_timer5_pending(void)
++static bool sf2000_timer_configured(unsigned index)
 +{
-+    uint32_t count;
-+    uint32_t irq_enable = 0;
-+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    return (sf2000_timer_ctrl[index] & SF2000_TIMER_CTRL_EN) &&
++           (sf2000_timer_ctrl[index] & SF2000_TIMER_CTRL_IEN);
++}
++
++static bool sf2000_irq1_enabled(uint32_t mask)
++{
 +    unsigned i;
 +
 +    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
 +        if (sf2000_regs[i].valid && sf2000_regs[i].addr == SF2000_IRQ_ENABLE1) {
-+            irq_enable = sf2000_regs[i].value;
-+            break;
++            return (sf2000_regs[i].value & mask) != 0;
 +        }
 +    }
 +
-+    if (!(irq_enable & SF2000_SB_TIMER_IRQ)) {
++    return false;
++}
++
++static bool sf2000_timer_pending(unsigned index)
++{
++    uint32_t count;
++
++    if (!sf2000_timer_configured(index)) {
++        return false;
++    }
++
++    /*
++     * TIMER0/TIMER1 are second/millisecond timers. Their +0 register is the
++     * target seconds value and +4 carries the target milliseconds in bits
++     * 0..9 plus tick-per-ms calibration in bits 16..31. They do not behave as
++     * free-running compare timers. Treating an unprogrammed target as a normal
++     * compare makes INT_ST stick forever after stock maincode enables them.
++     */
++    if (sf2000_timer_is_sec_ms(index)) {
++        uint32_t target_ms = sf2000_timer_cnt[index] * 1000u +
++                             (sf2000_timer_aim[index] & 0x3ffu);
++        uint32_t elapsed_ms = sf2000_timer_ms();
++
++        if (target_ms == 0) {
++            return false;
++        }
++
++        return elapsed_ms - target_ms < 0x80000000u;
++    }
++
++    count = sf2000_timer_ticks();
++    return count - sf2000_timer_aim[index] < 0x80000000u;
++}
++
++static bool sf2000_timer5_pending(void)
++{
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++
++    if (!sf2000_irq1_enabled(SF2000_SB_TIMER_IRQ)) {
 +        return false;
 +    }
 +
@@ -338,8 +395,7 @@
 +        return now >= sf2000_next_tick_ns;
 +    }
 +
-+    count = sf2000_timer_ticks();
-+    return count - sf2000_timer_aim[SF2000_TIMER5_INDEX] < 0x80000000u;
++    return sf2000_timer_pending(SF2000_TIMER5_INDEX);
 +}
 +
 +static void sf2000_timer_ack(void)
@@ -355,7 +411,9 @@
 +        return;
 +    }
 +
-+    qemu_set_irq(sf2000_eirq3, sf2000_timer5_pending());
++    qemu_set_irq(sf2000_eirq3, sf2000_timer5_pending() ||
++                 (sf2000_sdio_irq_pending &&
++                  sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
 +}
 +
 +static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
@@ -940,9 +998,22 @@
 +    unsigned i;
 +
 +    if (full_addr == SF2000_IRQ_STATUS1) {
-+        value = sf2000_timer5_pending() ? SF2000_SB_TIMER_IRQ : 0;
++        bool timer_pending = sf2000_timer5_pending();
++
++        value = timer_pending ? SF2000_SB_TIMER_IRQ : 0;
 +        if (sf2000_sdio_irq_pending) {
 +            value |= SF2000_SDIO_IRQ;
++        }
++        /*
++         * Before TIMER5 is programmed, the model injects a synthetic scheduler
++         * tick so stock boot leaves CP0 idle loops. Hardware presents timer
++         * interrupts as pulses; keeping the emulated line asserted after the
++         * status read lets the firmware re-enter its interrupt dispatcher and
++         * trip its nested-interrupt guard. Once TIMER5 exists, control-register
++         * acknowledgement handles the edge.
++         */
++        if (timer_pending && !sf2000_timer5_configured()) {
++            sf2000_timer_ack();
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS2) {
 +        value = 0;
@@ -975,9 +1046,9 @@
 +    } else if (full_addr == 0x1884c001) {
 +        value = 0; /* SDIO command engine idle. */
 +    } else if (full_addr == 0x1884c00b) {
-+        value = sf2000_sdio_xfer_done ? 0x0d : 0x09;
++        value = sf2000_sdio_xfer_done ? 0x0c : 0x09;
 +    } else if (full_addr == 0x1884c030) {
-+        value = sf2000_sdio_xfer_done ? 0x2d :
++        value = sf2000_sdio_xfer_done ? 0x2c :
 +                (sf2000_sdio_xfer_busy ? 0x21 : 0x20);
 +    } else if (full_addr == SF2000_TIMER_BASE + 0x08 &&
 +               sf2000_sdio_callback_pending) {
@@ -986,7 +1057,7 @@
 +               sf2000_sdio_callback_pending) {
 +        value = sf2000_timer_ctrl[1] | SF2000_TIMER_CTRL_INT;
 +    } else if (full_addr == 0x1880f04b) {
-+        value = 0; /* AUX controller command/status idle. */
++        value = 0; /* AUX command complete / idle. */
 +    } else if (full_addr == 0x1882e09a) {
 +        value = 0x40; /* SFLASH RX ready. */
 +    } else if (full_addr == 0x1882e0a0) {
@@ -994,19 +1065,34 @@
 +    } else if (sf2000_timer_decode(full_addr, &timer_index, &timer_offset)) {
 +        switch (timer_offset) {
 +        case 0:
-+            value = sf2000_timer_ticks() + sf2000_timer_cnt[timer_index];
++            if (sf2000_timer_is_sec_ms(timer_index)) {
++                value = sf2000_timer_cnt[timer_index];
++            } else {
++                value = sf2000_timer_ticks() + sf2000_timer_cnt[timer_index];
++            }
 +            break;
 +        case 4:
 +            value = sf2000_timer_aim[timer_index];
 +            break;
 +        case 8:
 +            value = sf2000_timer_ctrl[timer_index];
-+            if (sf2000_timer5_pending()) {
++            /*
++             * INT_ST is per timer. The CPU interrupt bank only consumes
++             * TIMER5 for the scheduler tick, but stock menu code polls other
++             * timer control registers directly after mounting the SD card.
++             */
++            if (timer_index == SF2000_TIMER5_INDEX ? sf2000_timer5_pending() :
++                sf2000_timer_pending(timer_index)) {
 +                value |= SF2000_TIMER_CTRL_INT;
++            }
++            if (sf2000_timer_is_sec_ms(timer_index)) {
++                value |= (sf2000_timer_ms() & 0x3ffu) << 16;
 +            }
 +            break;
 +        case 12:
-+            value = sf2000_timer_ticks() / 1000000u;
++            value = sf2000_timer_is_sec_ms(timer_index) ?
++                    sf2000_timer_ms() / 1000u :
++                    sf2000_timer_ticks() / 1000000u;
 +            break;
 +        default:
 +            value = 0;
@@ -1079,7 +1165,11 @@
 +    if (sf2000_timer_decode(full_addr, &timer_index, &timer_offset)) {
 +        switch (timer_offset) {
 +        case 0:
-+            sf2000_timer_cnt[timer_index] = value - sf2000_timer_ticks();
++            if (sf2000_timer_is_sec_ms(timer_index)) {
++                sf2000_timer_cnt[timer_index] = value;
++            } else {
++                sf2000_timer_cnt[timer_index] = value - sf2000_timer_ticks();
++            }
 +            break;
 +        case 4:
 +            sf2000_timer_aim[timer_index] = value;
@@ -1669,6 +1759,32 @@
 +                (uint64_t)SF2000_ASD_ENTRY, machine->kernel_filename);
 +}
 +
++static void sf2000_seed_boot_handoff(void)
++{
++    uint8_t header[8];
++    uint8_t data[64];
++
++    /*
++     * Stock maincode calls get_sysinfo_from_bl(), which expects the bootloader
++     * to leave magic at KSEG1 0xa0000010 and a kseg1 pointer at 0xa0000014.
++     * The structure is a compact boot handoff table. Only the display/output
++     * type is required for the menu to leave early AppInit; seed RGB_LCD and
++     * keep the remaining bytes zero until probing identifies more fields. The
++     * pointer advertises 0xa0000100, while the blob is backed at physical RAM
++     * 0x100.
++     */
++    memset(header, 0, sizeof(header));
++    memset(data, 0, sizeof(data));
++    stl_le_p(header, SF2000_BL_INFO_MAGIC);
++    stl_le_p(header + 4, SF2000_BL_INFO_DATA_KSEG1);
++    stl_le_p(data, SF2000_TVSYS_RGB_LCD);
++
++    rom_add_blob_fixed("sf2000.bl-handoff.header", header, sizeof(header),
++                       SF2000_BL_INFO_MAGIC_ADDR);
++    rom_add_blob_fixed("sf2000.bl-handoff.data", data, sizeof(data),
++                       SF2000_BL_INFO_DATA_ADDR);
++}
++
 +static void sf2000_cpu_reset(void *opaque)
 +{
 +    MIPSCPU *cpu = opaque;
@@ -1712,6 +1828,7 @@
 +    memory_region_init_ram(ram, NULL, "sf2000.ram", machine->ram_size,
 +                           &error_fatal);
 +    memory_region_add_subregion(sysmem, SF2000_RAM_BASE, ram);
++    sf2000_seed_boot_handoff();
 +
 +    memory_region_init_io(mmio, NULL, &sf2000_unimp_ops, NULL,
 +                          "sf2000.unimplemented-mmio", SF2000_MMIO_SIZE);
