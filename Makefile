@@ -16,7 +16,7 @@ LOG ?= build/logs/sf2000.log
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -26,6 +26,7 @@ help:
 		'  make deps          show required Alpine packages' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
+		'  make smoke-input   verify HMP/VNC keyboard events reach the keypad' \
 		'  make smoke-stock-bootloader verify stock bootloader reaches SD init' \
 		'  make smoke-stock-full diagnose stock bootloader FAT32 /BIOS/bisrv.asd load' \
 		'  make smoke-stock-full-bugfix verify fixed stock bootloader reaches firmware UI' \
@@ -129,6 +130,17 @@ smoke: build
 		-d guest_errors,unimp -D build/logs/smoke.log \
 		> build/logs/smoke.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded' build/logs/smoke.console
+
+smoke-input: build
+	mkdir -p build/logs
+	(sleep 1; printf 'sendkey right\n'; sleep 1; \
+		printf 'sendkey x\n'; sleep 1; printf 'quit\n') | \
+		$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+		-display none -serial none -monitor stdio \
+		-d guest_errors,unimp -D build/logs/smoke-input.log \
+		> build/logs/smoke-input.console 2>&1
+	grep -q 'sf2000: key qcode=right down=1' build/logs/smoke-input.log
+	grep -q 'sf2000: key qcode=x down=1' build/logs/smoke-input.log
 
 smoke-stock-bootloader: build
 	mkdir -p build/logs
