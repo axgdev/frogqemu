@@ -6,6 +6,10 @@ QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
 MKSD := build/mksf2000sd
 STOCK_SD_IMAGE := build/sf2000-stock.sd.img
 STOCK_SD_IMAGE_FAT16 := build/sf2000-stock-fat16.sd.img
+VANILLA_URL := https://github.com/Dteyn/Datafrog_SF2000_Vanilla/releases/download/v1.6/DATAFROG-SF2000-08.03-OS-Files-Only-VANILLA.zip
+VANILLA_ZIP := build/downloads/DATAFROG-SF2000-08.03-OS-Files-Only-VANILLA.zip
+VANILLA_DIR := build/vanilla-os
+VANILLA_SD_IMAGE := build/sf2000-vanilla.sd.img
 
 FIRMWARE ?= /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 FIRMWARE_BUGFIX ?= /root/host-frogdev/universal/orig_firmware/UpdateFirmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
@@ -13,10 +17,14 @@ ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
+CAPTURE_DELAY ?= 60
+SCREENSHOT ?= build/screenshots/sf2000-stock-capture.ppm
+GMA_DUMP_DIR ?= build/screenshots/gma
+GMA_DUMP_LIMIT ?= 16
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -36,6 +44,9 @@ help:
 		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
 		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
+		'  make capture-stock-ui write screendump and GMA frames to build/screenshots' \
+		'  make capture-vanilla-ui download vanilla OS files and capture GMA frames' \
+		'  make vanilla-sd    build a generated FAT32 image from the vanilla OS zip' \
 		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
 		'  make debug         run paused with GDB stub on :1234' \
 		'  make gdb           connect mipsel-mti-elf-gdb to :1234' \
@@ -44,7 +55,8 @@ help:
 
 deps:
 	@printf '%s\n' \
-		'apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib'
+		'apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib' \
+		'optional for vanilla-sd: apk add --no-cache dosfstools mtools unzip'
 
 fetch: $(QEMU_SRC)/.fetched
 
@@ -92,6 +104,26 @@ $(STOCK_SD_IMAGE): $(MKSD) $(ASD)
 $(STOCK_SD_IMAGE_FAT16): $(MKSD) $(ASD)
 	$(MKSD) $(ASD) $@ fat16
 
+$(VANILLA_ZIP):
+	mkdir -p $(dir $@)
+	curl -L -o $@ $(VANILLA_URL)
+
+$(VANILLA_DIR)/.extracted: $(VANILLA_ZIP)
+	rm -rf $(VANILLA_DIR)
+	mkdir -p $(VANILLA_DIR)
+	unzip -q $(VANILLA_ZIP) -d $(VANILLA_DIR)
+	touch $@
+
+$(VANILLA_SD_IMAGE): $(VANILLA_DIR)/.extracted
+	command -v mcopy >/dev/null
+	command -v mkfs.vfat >/dev/null
+	rm -f $@
+	truncate -s 256M $@
+	mkfs.vfat -n SF2000 $@
+	mcopy -i $@ -s $(VANILLA_DIR)/* ::
+
+vanilla-sd: $(VANILLA_SD_IMAGE)
+
 run-vnc: build
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
@@ -111,6 +143,34 @@ boot-stock-asd: build
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
+
+capture-stock-ui: build $(STOCK_SD_IMAGE)
+	mkdir -p $(dir $(LOG)) $(dir $(SCREENSHOT)) $(GMA_DUMP_DIR)
+	(sleep $(CAPTURE_DELAY); printf 'screendump %s\n' '$(SCREENSHOT)'; \
+		sleep 1; printf 'quit\n') | \
+		SF2000_GMA_DUMP_DIR=$(GMA_DUMP_DIR) \
+		SF2000_GMA_DUMP_LIMIT=$(GMA_DUMP_LIMIT) \
+		$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
+		-display none -serial none -monitor stdio \
+		-d guest_errors,unimp -D $(LOG) \
+		> build/logs/capture-stock-ui.console 2>&1
+	@printf 'wrote %s\n' '$(SCREENSHOT)'
+	@find $(GMA_DUMP_DIR) -maxdepth 1 -type f -name 'sf2000-gma-*.ppm' -print | sort | tail -5
+
+capture-vanilla-ui: build $(VANILLA_SD_IMAGE)
+	mkdir -p $(dir $(LOG)) $(dir $(SCREENSHOT)) $(GMA_DUMP_DIR)
+	(sleep $(CAPTURE_DELAY); printf 'screendump %s\n' '$(SCREENSHOT)'; \
+		sleep 1; printf 'quit\n') | \
+		SF2000_GMA_DUMP_DIR=$(GMA_DUMP_DIR) \
+		SF2000_GMA_DUMP_LIMIT=$(GMA_DUMP_LIMIT) \
+		$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
+		-display none -serial none -monitor stdio \
+		-d guest_errors,unimp -D $(LOG) \
+		> build/logs/capture-vanilla-ui.console 2>&1
+	@printf 'wrote %s\n' '$(SCREENSHOT)'
+	@find $(GMA_DUMP_DIR) -maxdepth 1 -type f -name 'sf2000-gma-*.ppm' -print | sort | tail -5
 
 debug: build
 	mkdir -p $(dir $(LOG))

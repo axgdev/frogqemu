@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1615 @@
+@@ -0,0 +1,1741 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -63,6 +63,22 @@
 +#define TYPE_SF2000_LCD "sf2000-lcd"
 +OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 +
++/*
++ * Address map notes
++ * -----------------
++ *
++ * The SF2000/HC15xx boots a MIPS core from the usual reset vector at
++ * virtual 0xbfc00000. QEMU sees that through physical 0x1fc00000, so the SPI
++ * flash image is mapped there. Firmware later uses kseg0/kseg1 virtual
++ * aliases for RAM and peripherals:
++ *
++ *   0x80000000 -> cached physical RAM at 0x00000000
++ *   0xa0000000 -> uncached physical RAM at 0x00000000
++ *   0xb8800000 -> uncached physical MMIO at 0x18800000
++ *
++ * Most constants below are physical addresses, matching what QEMU's memory
++ * subsystem receives after MIPS address translation.
++ */
 +#define SF2000_RAM_BASE        0x00000000ULL
 +#define SF2000_RAM_DEFAULT     (128 * MiB)
 +#define SF2000_BOOT_BASE       0x1fc00000ULL
@@ -118,6 +134,13 @@
 +} SF2000RegDefault;
 +
 +static const SF2000RegDefault sf2000_reg_defaults[] = {
++    /*
++     * These defaults come from three sources: the real-device UniFrog hardware
++     * probe logs, HCRTOS DTS/pinmux defaults, and stock firmware traces. They
++     * are deliberately conservative: return values that keep firmware on the
++     * HC15xx/SF2000 path, but still log unknown addresses so later probes can
++     * replace table entries with real device models.
++     */
 +    { 0x18800000, 0x1512a501 }, { 0x18800024, 0xffff0000 },
 +    { 0x18800028, 0xffffffff }, { 0x1880002c, 0xffffffff },
 +    { 0x18800038, 0x00480415 }, { 0x1880003c, 0x00000008 },
@@ -221,6 +244,7 @@
 +static uint32_t sf2000_key_mask;
 +static unsigned sf2000_key_shift_index;
 +static uint32_t sf2000_gpio_l_out;
++static unsigned sf2000_gma_dump_count;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
@@ -303,11 +327,12 @@
 +    }
 +
 +    /*
-+     * Stock and HCRTOS both route the scheduler through external bank bit 22.
-+     * Early stock boot enables that bit before programming TIMER5, then idles
-+     * around CP0 Count. Keep a low-rate synthetic tick available as soon as the
-+     * bank bit is enabled, and switch to compare-based behavior once TIMER5 is
-+     * configured.
++     * Stock and HCRTOS both route the scheduler through external interrupt
++     * bank 1 bit 22, then into MIPS external interrupt line 3. Early stock boot
++     * enables the bank bit before programming TIMER5 and idles around CP0
++     * Count, so waiting for an exact hardware timer configuration deadlocks.
++     * The synthetic tick keeps boot moving until the firmware writes TIMER5;
++     * after that, compare-based behavior is used.
 +     */
 +    if (!sf2000_timer5_configured()) {
 +        return now >= sf2000_next_tick_ns;
@@ -319,7 +344,8 @@
 +
 +static void sf2000_timer_ack(void)
 +{
-+    sf2000_next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 20;
++    sf2000_next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                          NANOSECONDS_PER_SECOND / 20;
 +    sf2000_timer_ctrl[SF2000_TIMER5_INDEX] &= ~SF2000_TIMER_CTRL_INT;
 +}
 +
@@ -378,6 +404,12 @@
 +
 +    value = sf2000_adc_ctrl[index];
 +    if (index == 0) {
++        /*
++         * HCRTOS exposes battery/key ADC through SAR_ADC_CTRL_REG0:
++         * bit 8 is interrupt/status, bits 23:16 are the latest 8-bit sample.
++         * UniFrog's battery thresholds treat raw 200 as about 4.0 V, so this
++         * value presents a healthy battery without requiring analog modelling.
++         */
 +        value &= ~0x00ff0100u;
 +        value |= (SF2000_ADC_SAMPLE << 16) | BIT(8);
 +    }
@@ -432,7 +464,9 @@
 +    /*
 +     * The SF2000 local keypad is a 12-bit active-low shift register on L23
 +     * with clock on L24. Driving L23 low is the parallel-load phase used by
-+     * UniFrog and the stock firmware before switching it back to input.
++     * UniFrog and the stock firmware before switching it back to input. This
++     * is why keyboard state is not returned as one flat GPIO register: each
++     * rising clock edge advances the sampled key bit.
 +     */
 +    if (!(value & BIT(SF2000_KEY_DATA_BIT))) {
 +        sf2000_key_shift_index = 0;
@@ -566,6 +600,12 @@
 +    sf2000_sdio_xfer_busy = false;
 +    sf2000_sdio_irq_pending = true;
 +    sf2000_sdio_callback_pending = true;
++    /*
++     * The HC15xx SDIO block has two completion surfaces in the stock traces:
++     * the SDIO status bits themselves and a later timer callback path used by
++     * the firmware's asynchronous disk layer. Raising both keeps bootloader
++     * sector reads and stock firmware FatFs mounting on the same model.
++     */
 +    qemu_log_mask(LOG_UNIMP,
 +                  "sf2000: sdio-dma-read lba=%u sectors=%u dst=0x%08x len=%u copied=%u image=%d result=%d\n",
 +                  lba, sectors, sf2000_sdio_dma_addr, len, copied,
@@ -645,6 +685,11 @@
 +        sf2000_sdio_resp[3] = 0x400e0032;
 +        break;
 +    case 41:
++        /*
++         * ACMD41 OCR response. The model reports ready with broad voltage
++         * support because the goal is testing SF2000 firmware behavior rather
++         * than SD-card electrical negotiation.
++         */
 +        sf2000_sdio_resp[0] = 0xffffffff; /* Permissive OCR: ready and all supported voltage bits. */
 +        sf2000_sdio_resp[1] = 0xffffffff;
 +        break;
@@ -786,6 +831,12 @@
 +
 +static uint16_t sf2000_panel_data_from_gpio(SF2000LCDState *s)
 +{
++    /*
++     * Stock panel init bit-bangs an ST7789V-compatible 8080 bus over split GPIO
++     * banks. The mapping below was inferred from the existing UniFrog display
++     * path and real logs: GPIO_L contributes low data bits while GPIO bank 3
++     * contributes the remaining bus bits and RS. WR rising edge latches.
++     */
 +    return ((s->gpio54 >> 2) & 0x1f) |
 +           ((s->gpio354 >> 4) & 0x7e0) |
 +           ((s->gpio354 & 0x7c) << 9);
@@ -817,6 +868,67 @@
 +    if (!old_wr && new_wr) {
 +        sf2000_panel_latch(s, sf2000_panel_data_from_gpio(s));
 +    }
++}
++
++static void sf2000_write_ppm_from_surface(SF2000LCDState *s, const char *path)
++{
++    DisplaySurface *surface;
++    FILE *f;
++    int y;
++
++    f = fopen(path, "wb");
++    if (!f) {
++        qemu_log_mask(LOG_UNIMP, "sf2000: gma-dump-open-failed path=%s\n",
++                      path);
++        return;
++    }
++
++    surface = qemu_console_surface(s->con);
++    fprintf(f, "P6\n%d %d\n255\n", SF2000_LCD_WIDTH, SF2000_LCD_HEIGHT);
++    for (y = 0; y < SF2000_LCD_HEIGHT; y++) {
++        const uint32_t *src = (const uint32_t *)(surface_data(surface) +
++                              y * surface_stride(surface));
++        int x;
++
++        for (x = 0; x < SF2000_LCD_WIDTH; x++) {
++            uint8_t rgb[3] = {
++                (uint8_t)(src[x] >> 16),
++                (uint8_t)(src[x] >> 8),
++                (uint8_t)src[x],
++            };
++            fwrite(rgb, sizeof(rgb), 1, f);
++        }
++    }
++    fclose(f);
++    qemu_log_mask(LOG_UNIMP, "sf2000: gma-dump path=%s\n", path);
++}
++
++static void sf2000_dump_ppm_from_surface(SF2000LCDState *s,
++                                         const char *tag)
++{
++    g_autofree char *path = NULL;
++    g_autofree char *latest_path = NULL;
++    uint32_t limit = 16;
++    const char *dir = g_getenv("SF2000_GMA_DUMP_DIR");
++    const char *limit_s = g_getenv("SF2000_GMA_DUMP_LIMIT");
++
++    if (!dir || !*dir || !s || !s->con) {
++        return;
++    }
++    if (limit_s && *limit_s) {
++        limit = MAX(1, (uint32_t)g_ascii_strtoull(limit_s, NULL, 0));
++    }
++
++    g_mkdir_with_parents(dir, 0755);
++    latest_path = g_strdup_printf("%s/sf2000-%s-latest.ppm", dir, tag);
++    sf2000_write_ppm_from_surface(s, latest_path);
++
++    if (sf2000_gma_dump_count >= limit) {
++        return;
++    }
++    path = g_strdup_printf("%s/sf2000-%s-%04u.ppm", dir, tag,
++                           sf2000_gma_dump_count++);
++    sf2000_write_ppm_from_surface(s, path);
 +}
 +
 +static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
@@ -1162,6 +1274,13 @@
 +    d5 = ldl_le_p(header + 20);
 +    d7 = ldl_le_p(header + 28);
 +
++    /*
++     * GMA/GE display updates are driven by a descriptor memory base address
++     * written to the 0x18808304/0x18808384 doorbells. The first 40 bytes are a
++     * compact descriptor: d0 contains the pixel mode and CLUT-update flag, d1
++     * points at a 256-entry ARGB palette for CLUT8, d2/d3 describe the output
++     * rectangle, d4/d5 describe source geometry/pitch, and d7 is bitmap data.
++     */
 +    mode = (d0 >> 4) & 0xf;
 +    clut_update = (d0 >> 10) & 1;
 +    sx = d2 & 0xfff;
@@ -1255,6 +1374,13 @@
 +    g_free(linebuf);
 +
 +    dpy_gfx_update(s->con, sx, sy, width, height);
++    /*
++     * QEMU's generic screendump does not always observe this custom console
++     * while running headless. The optional SF2000_GMA_DUMP_DIR hook writes PPM
++     * frames exactly after a descriptor is presented, giving us deterministic
++     * artifacts to compare against real-device photos or captures.
++     */
++    sf2000_dump_ppm_from_surface(s, "gma");
 +    qemu_log_mask(LOG_UNIMP,
 +                  "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u\n",
 +                  dmba_addr, d7, mode, sx, sy, width, height, pitch,
