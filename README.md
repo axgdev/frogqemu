@@ -69,14 +69,15 @@ bootloader reaches UART output and SD initialization. The direct reset-vector
 path still needs the vendor cache trampoline modelled before it can run without
 this helper entry.
 
-`make smoke-stock-full` builds `build/sf2000-stock.sd.img`, a tiny FAT image
-containing `/BIOS/bisrv.asd`, then boots the stock bootloader against that raw
-image. This is the current full-chain diagnostic target. It proves block-backed
-SD reads from the bootloader path. The generated image uses a small FAT16
-layout because that matches the stock bootloader path better than the earlier
-FAT32 probe. The target currently accepts the bootloader finding `BISRV.ASD`;
-the next blocker is the follow-up close/read path tripping the bootloader's
-exception handler after the first file-sector read.
+`make smoke-stock-full` builds `build/sf2000-stock.sd.img`, a sparse FAT32 SD
+image containing `/BIOS/bisrv.asd`, then boots the stock bootloader against
+that raw image. This is the current full-chain diagnostic target. It proves
+block-backed SD reads from the bootloader path through the MBR, FAT32 VBR,
+FSINFO sector, root directory, and `BIOS` directory. `make
+smoke-stock-full-fat16` keeps a FAT16 comparison image because it is useful for
+isolating bootloader file-system assumptions. The target currently accepts the
+bootloader finding `BISRV.ASD`; the next blocker is the follow-up file-object
+geometry path deriving compatibility LBA `0x202020`.
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount

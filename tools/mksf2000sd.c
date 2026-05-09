@@ -6,18 +6,30 @@
 
 enum {
     SECTOR_SIZE = 512,
-    TOTAL_SECTORS = 131072,
     PART_LBA = 2048,
-    PART_SECTORS = TOTAL_SECTORS - PART_LBA,
-    RESERVED_SECTORS = 1,
     FAT_COUNT = 2,
-    FAT_SECTORS = 64,
-    ROOT_ENTRIES = 512,
-    ROOT_SECTORS = ROOT_ENTRIES * 32 / SECTOR_SIZE,
     SECTORS_PER_CLUSTER = 8,
-    BIOS_CLUSTER = 2,
-    FILE_CLUSTER = 3,
+    ROOT_CLUSTER = 2,
+    BIOS_CLUSTER = 3,
+    FILE_CLUSTER = 4,
     BOOTLOADER_COMPAT_FILE_LBA = 0x202020,
+
+    FAT16_TOTAL_SECTORS = 131072,
+    FAT16_PART_SECTORS = FAT16_TOTAL_SECTORS - PART_LBA,
+    FAT16_RESERVED_SECTORS = 1,
+    FAT16_FAT_SECTORS = 64,
+    FAT16_ROOT_ENTRIES = 512,
+    FAT16_ROOT_SECTORS = FAT16_ROOT_ENTRIES * 32 / SECTOR_SIZE,
+
+    FAT32_TOTAL_SECTORS = 2162688,
+    FAT32_PART_SECTORS = FAT32_TOTAL_SECTORS - PART_LBA,
+    FAT32_RESERVED_SECTORS = 32,
+    FAT32_FAT_SECTORS = 2304,
+};
+
+enum fs_kind {
+    FS_FAT16,
+    FS_FAT32,
 };
 
 static void put16(uint8_t *p, uint16_t v)
@@ -43,16 +55,6 @@ static void write_at(FILE *out, uint32_t sector, const void *buf, size_t len)
     }
 }
 
-static uint32_t data_lba(void)
-{
-    return PART_LBA + RESERVED_SECTORS + FAT_COUNT * FAT_SECTORS + ROOT_SECTORS;
-}
-
-static uint32_t cluster_lba(uint32_t cluster)
-{
-    return data_lba() + (cluster - 2) * SECTORS_PER_CLUSTER;
-}
-
 static void dirent(uint8_t *p, const char name[11], uint8_t attr,
                    uint32_t cluster, uint32_t size)
 {
@@ -63,75 +65,191 @@ static void dirent(uint8_t *p, const char name[11], uint8_t attr,
     put32(p + 28, size);
 }
 
-static void write_boot(FILE *out)
+static uint32_t fat16_data_lba(void)
+{
+    return PART_LBA + FAT16_RESERVED_SECTORS +
+           FAT_COUNT * FAT16_FAT_SECTORS + FAT16_ROOT_SECTORS;
+}
+
+static uint32_t fat32_data_lba(void)
+{
+    return PART_LBA + FAT32_RESERVED_SECTORS +
+           FAT_COUNT * FAT32_FAT_SECTORS;
+}
+
+static uint32_t fat16_cluster_lba(uint32_t cluster)
+{
+    return fat16_data_lba() + (cluster - 2) * SECTORS_PER_CLUSTER;
+}
+
+static uint32_t fat32_cluster_lba(uint32_t cluster)
+{
+    return fat32_data_lba() + (cluster - 2) * SECTORS_PER_CLUSTER;
+}
+
+static void write_mbr(FILE *out, uint8_t partition_type, uint32_t part_sectors)
 {
     uint8_t sector[SECTOR_SIZE];
 
     memset(sector, 0, sizeof(sector));
-    memcpy(sector + 0x1be, "\x80\x01\x01\x00\x06\xfe\xff\xff", 8);
+    memcpy(sector + 0x1be, "\x80\x01\x01\x00", 4);
+    sector[0x1be + 4] = partition_type;
+    memcpy(sector + 0x1be + 5, "\xfe\xff\xff", 3);
     put32(sector + 0x1c6, PART_LBA);
-    put32(sector + 0x1ca, PART_SECTORS);
+    put32(sector + 0x1ca, part_sectors);
     sector[510] = 0x55;
     sector[511] = 0xaa;
     write_at(out, 0, sector, sizeof(sector));
+}
 
+static void write_fat16_boot(FILE *out)
+{
+    uint8_t sector[SECTOR_SIZE];
+
+    write_mbr(out, 0x06, FAT16_PART_SECTORS);
     memset(sector, 0, sizeof(sector));
     memcpy(sector, "\xeb\x58\x90MSDOS5.0", 11);
     put16(sector + 11, SECTOR_SIZE);
     sector[13] = SECTORS_PER_CLUSTER;
-    put16(sector + 14, RESERVED_SECTORS);
+    put16(sector + 14, FAT16_RESERVED_SECTORS);
     sector[16] = FAT_COUNT;
-    put16(sector + 17, ROOT_ENTRIES);
-    put32(sector + 32, PART_SECTORS);
+    put16(sector + 17, FAT16_ROOT_ENTRIES);
+    put32(sector + 32, FAT16_PART_SECTORS);
     sector[21] = 0xf8;
-    put16(sector + 22, FAT_SECTORS);
+    put16(sector + 22, FAT16_FAT_SECTORS);
     put16(sector + 24, 63);
     put16(sector + 26, 255);
     put32(sector + 28, PART_LBA);
+    sector[36] = 0x80;
+    sector[38] = 0x29;
+    put32(sector + 39, 0x53463230);
+    memcpy(sector + 43, "SF2000     ", 11);
     memcpy(sector + 54, "FAT16   ", 8);
     sector[510] = 0x55;
     sector[511] = 0xaa;
     write_at(out, PART_LBA, sector, sizeof(sector));
 }
 
-static void fat16(uint8_t *fat, uint32_t cluster, uint16_t value)
+static void write_fat32_boot(FILE *out)
+{
+    uint8_t sector[SECTOR_SIZE];
+
+    write_mbr(out, 0x0c, FAT32_PART_SECTORS);
+    memset(sector, 0, sizeof(sector));
+    memcpy(sector, "\xeb\x58\x90MSDOS5.0", 11);
+    put16(sector + 11, SECTOR_SIZE);
+    sector[13] = SECTORS_PER_CLUSTER;
+    put16(sector + 14, FAT32_RESERVED_SECTORS);
+    sector[16] = FAT_COUNT;
+    put32(sector + 32, FAT32_PART_SECTORS);
+    sector[21] = 0xf8;
+    put16(sector + 24, 63);
+    put16(sector + 26, 255);
+    put32(sector + 28, PART_LBA);
+    put32(sector + 36, FAT32_FAT_SECTORS);
+    put32(sector + 44, ROOT_CLUSTER);
+    put16(sector + 48, 1);
+    put16(sector + 50, 6);
+    sector[64] = 0x80;
+    sector[66] = 0x29;
+    put32(sector + 67, 0x53463230);
+    memcpy(sector + 71, "SF2000     ", 11);
+    memcpy(sector + 82, "FAT32   ", 8);
+    sector[510] = 0x55;
+    sector[511] = 0xaa;
+    write_at(out, PART_LBA, sector, sizeof(sector));
+    write_at(out, PART_LBA + 6, sector, sizeof(sector));
+
+    memset(sector, 0, sizeof(sector));
+    put32(sector, 0x41615252);
+    put32(sector + 484, 0x61417272);
+    put32(sector + 488, 0xffffffff);
+    put32(sector + 492, 5);
+    sector[510] = 0x55;
+    sector[511] = 0xaa;
+    write_at(out, PART_LBA + 1, sector, sizeof(sector));
+    write_at(out, PART_LBA + 7, sector, sizeof(sector));
+}
+
+static void fat16_put(uint8_t *fat, uint32_t cluster, uint16_t value)
 {
     put16(fat + cluster * 2, value);
 }
 
-static void write_fat(FILE *out, uint32_t file_clusters)
+static void fat32_put(uint8_t *fat, uint32_t cluster, uint32_t value)
 {
-    uint8_t fat[FAT_SECTORS * SECTOR_SIZE];
+    put32(fat + cluster * 4, value);
+}
+
+static void write_fat16(FILE *out, uint32_t file_clusters)
+{
+    uint8_t fat[FAT16_FAT_SECTORS * SECTOR_SIZE];
     uint32_t i;
 
     memset(fat, 0, sizeof(fat));
-    fat16(fat, 0, 0xfff8);
-    fat16(fat, 1, 0xffff);
-    fat16(fat, BIOS_CLUSTER, 0xffff);
+    fat16_put(fat, 0, 0xfff8);
+    fat16_put(fat, 1, 0xffff);
+    fat16_put(fat, BIOS_CLUSTER, 0xffff);
     for (i = 0; i < file_clusters; i++) {
         uint32_t cluster = FILE_CLUSTER + i;
         uint16_t next = i + 1 == file_clusters ? 0xffff : cluster + 1;
-        fat16(fat, cluster, next);
+        fat16_put(fat, cluster, next);
     }
-    write_at(out, PART_LBA + RESERVED_SECTORS, fat, sizeof(fat));
-    write_at(out, PART_LBA + RESERVED_SECTORS + FAT_SECTORS, fat, sizeof(fat));
+    write_at(out, PART_LBA + FAT16_RESERVED_SECTORS, fat, sizeof(fat));
+    write_at(out, PART_LBA + FAT16_RESERVED_SECTORS + FAT16_FAT_SECTORS,
+             fat, sizeof(fat));
 }
 
-static void write_dirs(FILE *out, uint32_t asd_size)
+static void write_fat32(FILE *out, uint32_t file_clusters)
 {
-    uint8_t root[ROOT_SECTORS * SECTOR_SIZE];
+    uint8_t fat[FAT32_FAT_SECTORS * SECTOR_SIZE];
+    uint32_t i;
+
+    memset(fat, 0, sizeof(fat));
+    fat32_put(fat, 0, 0x0ffffff8);
+    fat32_put(fat, 1, 0xffffffff);
+    fat32_put(fat, ROOT_CLUSTER, 0x0fffffff);
+    fat32_put(fat, BIOS_CLUSTER, 0x0fffffff);
+    for (i = 0; i < file_clusters; i++) {
+        uint32_t cluster = FILE_CLUSTER + i;
+        uint32_t next = i + 1 == file_clusters ? 0x0fffffff : cluster + 1;
+        fat32_put(fat, cluster, next);
+    }
+    write_at(out, PART_LBA + FAT32_RESERVED_SECTORS, fat, sizeof(fat));
+    write_at(out, PART_LBA + FAT32_RESERVED_SECTORS + FAT32_FAT_SECTORS,
+             fat, sizeof(fat));
+}
+
+static void write_fat16_dirs(FILE *out, uint32_t asd_size)
+{
+    uint8_t root[FAT16_ROOT_SECTORS * SECTOR_SIZE];
     uint8_t cluster[SECTORS_PER_CLUSTER * SECTOR_SIZE];
 
     memset(root, 0, sizeof(root));
     dirent(root, "BIOS       ", 0x10, BIOS_CLUSTER, 0);
-    write_at(out, PART_LBA + RESERVED_SECTORS + FAT_COUNT * FAT_SECTORS,
-             root, sizeof(root));
+    write_at(out, PART_LBA + FAT16_RESERVED_SECTORS +
+             FAT_COUNT * FAT16_FAT_SECTORS, root, sizeof(root));
 
     memset(cluster, 0, sizeof(cluster));
     dirent(cluster, ".          ", 0x10, BIOS_CLUSTER, 0);
     dirent(cluster + 32, "..         ", 0x10, 0, 0);
     dirent(cluster + 64, "BISRV   ASD", 0x20, FILE_CLUSTER, asd_size);
-    write_at(out, cluster_lba(BIOS_CLUSTER), cluster, sizeof(cluster));
+    write_at(out, fat16_cluster_lba(BIOS_CLUSTER), cluster, sizeof(cluster));
+}
+
+static void write_fat32_dirs(FILE *out, uint32_t asd_size)
+{
+    uint8_t cluster[SECTORS_PER_CLUSTER * SECTOR_SIZE];
+
+    memset(cluster, 0, sizeof(cluster));
+    dirent(cluster, "BIOS       ", 0x10, BIOS_CLUSTER, 0);
+    write_at(out, fat32_cluster_lba(ROOT_CLUSTER), cluster, sizeof(cluster));
+
+    memset(cluster, 0, sizeof(cluster));
+    dirent(cluster, ".          ", 0x10, BIOS_CLUSTER, 0);
+    dirent(cluster + 32, "..         ", 0x10, ROOT_CLUSTER, 0);
+    dirent(cluster + 64, "BISRV   ASD", 0x20, FILE_CLUSTER, asd_size);
+    write_at(out, fat32_cluster_lba(BIOS_CLUSTER), cluster, sizeof(cluster));
 }
 
 static uint8_t *read_file(const char *path, size_t *size)
@@ -159,23 +277,43 @@ static uint8_t *read_file(const char *path, size_t *size)
     return buf;
 }
 
+static enum fs_kind parse_fs(int argc, char **argv)
+{
+    if (argc == 3 || strcmp(argv[3], "fat32") == 0) {
+        return FS_FAT32;
+    }
+    if (strcmp(argv[3], "fat16") == 0) {
+        return FS_FAT16;
+    }
+    fprintf(stderr, "unknown filesystem '%s' (expected fat32 or fat16)\n", argv[3]);
+    exit(2);
+}
+
 int main(int argc, char **argv)
 {
     FILE *out;
     uint8_t *asd;
     size_t asd_size;
     uint32_t file_clusters;
+    enum fs_kind fs;
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s bisrv.asd sd.img\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s bisrv.asd sd.img [fat32|fat16]\n", argv[0]);
         return 2;
     }
 
+    fs = parse_fs(argc, argv);
     asd = read_file(argv[1], &asd_size);
     file_clusters = (asd_size + SECTORS_PER_CLUSTER * SECTOR_SIZE - 1) /
                     (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-    if (FILE_CLUSTER + file_clusters >= (FAT_SECTORS * SECTOR_SIZE) / 2) {
-        fprintf(stderr, "ASD is too large for the tiny FAT image\n");
+    if (fs == FS_FAT16 &&
+        FILE_CLUSTER + file_clusters >= (FAT16_FAT_SECTORS * SECTOR_SIZE) / 2) {
+        fprintf(stderr, "ASD is too large for the tiny FAT16 image\n");
+        return 1;
+    }
+    if (fs == FS_FAT32 &&
+        FILE_CLUSTER + file_clusters >= (FAT32_FAT_SECTORS * SECTOR_SIZE) / 4) {
+        fprintf(stderr, "ASD is too large for the tiny FAT32 image\n");
         return 1;
     }
 
@@ -184,23 +322,38 @@ int main(int argc, char **argv)
         fprintf(stderr, "open %s failed: %s\n", argv[2], strerror(errno));
         return 1;
     }
-    if (fseek(out, (long)TOTAL_SECTORS * SECTOR_SIZE - 1, SEEK_SET) != 0 ||
+    if (fseek(out, (long)(fs == FS_FAT32 ? FAT32_TOTAL_SECTORS :
+                         FAT16_TOTAL_SECTORS) * SECTOR_SIZE - 1, SEEK_SET) != 0 ||
         fputc(0, out) == EOF) {
         fprintf(stderr, "size %s failed: %s\n", argv[2], strerror(errno));
         return 1;
     }
 
-    write_boot(out);
-    write_fat(out, file_clusters);
-    write_dirs(out, (uint32_t)asd_size);
-    write_at(out, cluster_lba(FILE_CLUSTER), asd, asd_size);
-    /*
-     * Current stock bootloader emulation finds BISRV.ASD in the FAT16
-     * directory but computes the first file LBA as 0x202020. Mirror the ASD
-     * there so the full-chain diagnostic can continue past this known geometry
-     * bug and expose the next hardware contract.
-     */
-    write_at(out, BOOTLOADER_COMPAT_FILE_LBA, asd, asd_size);
+    if (fs == FS_FAT32) {
+        write_fat32_boot(out);
+        write_fat32(out, file_clusters);
+        write_fat32_dirs(out, (uint32_t)asd_size);
+        write_at(out, fat32_cluster_lba(FILE_CLUSTER), asd, asd_size);
+        /*
+         * The stock bootloader now finds the FAT32 directory entry, but the
+         * current SD/FatFs emulation still derives this compatibility LBA for
+         * the first file sector. Mirror the ASD here to keep the full-chain
+         * diagnostic moving while that bootloader contract is narrowed.
+         */
+        write_at(out, BOOTLOADER_COMPAT_FILE_LBA, asd, asd_size);
+    } else {
+        write_fat16_boot(out);
+        write_fat16(out, file_clusters);
+        write_fat16_dirs(out, (uint32_t)asd_size);
+        write_at(out, fat16_cluster_lba(FILE_CLUSTER), asd, asd_size);
+        /*
+         * Current stock bootloader emulation finds BISRV.ASD in the FAT16
+         * directory but computes the first file LBA as 0x202020. Mirror the
+         * ASD there so this diagnostic can expose later hardware contracts.
+         */
+        write_at(out, BOOTLOADER_COMPAT_FILE_LBA, asd, asd_size);
+    }
+
     fclose(out);
     free(asd);
     return 0;
