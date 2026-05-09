@@ -338,24 +338,37 @@
 +static void sf2000_sdio_dma_read(uint32_t lba)
 +{
 +    uint8_t sector[512];
-+    MemTxResult result;
++    MemTxResult result = MEMTX_OK;
 +    uint32_t len = sf2000_sdio_dma_len ? sf2000_sdio_dma_len : 512;
-+    bool image_backed;
++    uint32_t copied = 0;
++    uint32_t sectors = (len + sizeof(sector) - 1) / sizeof(sector);
++    bool image_backed = true;
++    uint32_t i;
 +
-+    if (len > sizeof(sector)) {
-+        len = sizeof(sector);
++    for (i = 0; i < sectors; i++) {
++        uint32_t chunk = len - copied;
++
++        if (chunk > sizeof(sector)) {
++            chunk = sizeof(sector);
++        }
++        image_backed &= sf2000_sdio_read_sector(lba + i, sector);
++        result = dma_memory_write(&address_space_memory,
++                                  sf2000_sdio_dma_addr + copied,
++                                  sector, chunk, MEMTXATTRS_UNSPECIFIED);
++        if (result != MEMTX_OK) {
++            break;
++        }
++        copied += chunk;
 +    }
 +
-+    image_backed = sf2000_sdio_read_sector(lba, sector);
-+    result = dma_memory_write(&address_space_memory, sf2000_sdio_dma_addr,
-+                              sector, len, MEMTXATTRS_UNSPECIFIED);
 +    sf2000_sdio_xfer_done = true;
 +    sf2000_sdio_xfer_busy = false;
 +    sf2000_sdio_irq_pending = true;
 +    sf2000_sdio_callback_pending = true;
 +    qemu_log_mask(LOG_UNIMP,
-+                  "sf2000: sdio-dma-read lba=%u dst=0x%08x len=%u image=%d result=%d\n",
-+                  lba, sf2000_sdio_dma_addr, len, image_backed, result);
++                  "sf2000: sdio-dma-read lba=%u sectors=%u dst=0x%08x len=%u copied=%u image=%d result=%d\n",
++                  lba, sectors, sf2000_sdio_dma_addr, len, copied,
++                  image_backed, result);
 +}
 +
 +static void sf2000_sdio_complete_cmd(void)

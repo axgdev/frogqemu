@@ -8,6 +8,7 @@ STOCK_SD_IMAGE := build/sf2000-stock.sd.img
 STOCK_SD_IMAGE_FAT16 := build/sf2000-stock-fat16.sd.img
 
 FIRMWARE ?= /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+FIRMWARE_BUGFIX ?= /root/host-frogdev/universal/orig_firmware/UpdateFirmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
 ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
@@ -15,7 +16,7 @@ LOG ?= build/logs/sf2000.log
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-full smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -27,6 +28,7 @@ help:
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-stock-bootloader verify stock bootloader reaches SD init' \
 		'  make smoke-stock-full diagnose stock bootloader FAT32 /BIOS/bisrv.asd load' \
+		'  make smoke-stock-full-bugfix verify fixed stock bootloader reaches firmware UI' \
 		'  make smoke-stock-full-fat16 run the same bootloader path on FAT16' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
@@ -148,6 +150,19 @@ smoke-stock-full: build $(STOCK_SD_IMAGE)
 	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-full.log
 	grep -q 'uart: \[INFO\].SD init cost' build/logs/smoke-stock-full.log
 	grep -Eq 'uart: \[FS\]successed!|gma-present|uart: \[INFO\].----A BISRV.ASD|uart: \[ERR\].No Upgrade file -- 0:BIOS/bisrv.asd' build/logs/smoke-stock-full.log
+
+smoke-stock-full-bugfix: build $(STOCK_SD_IMAGE)
+	mkdir -p build/logs
+	timeout 60s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-full-bugfix.log \
+		> build/logs/smoke-stock-full-bugfix.console 2>&1 || test $$? -eq 124
+	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-full-bugfix.log
+	grep -q 'uart: \[INFO\].CRC check pass !' build/logs/smoke-stock-full-bugfix.log
+	grep -q 'gma-present .*mode=12' build/logs/smoke-stock-full-bugfix.log
+	grep -q 'gma-present .*mode=6' build/logs/smoke-stock-full-bugfix.log
+	grep -q 'uart: \[FS\]mount: /dev/sda1 -> /mnt/sda1' build/logs/smoke-stock-full-bugfix.log
 
 smoke-stock-full-fat16: build $(STOCK_SD_IMAGE_FAT16)
 	mkdir -p build/logs

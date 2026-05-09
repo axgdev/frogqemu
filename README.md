@@ -58,6 +58,7 @@ Run the current direct stock ASD bring-up smoke with:
 ```sh
 make smoke-stock-bootloader
 make smoke-stock-full
+make smoke-stock-full-bugfix
 make smoke-stock-asd
 make smoke-stock-fatfs
 make smoke-stock-display
@@ -73,11 +74,13 @@ this helper entry.
 image containing `/BIOS/bisrv.asd`, then boots the stock bootloader against
 that raw image. This is the current full-chain diagnostic target. It proves
 block-backed SD reads from the bootloader path through the MBR, FAT32 VBR,
-FSINFO sector, root directory, and `BIOS` directory. `make
-smoke-stock-full-fat16` keeps a FAT16 comparison image because it is useful for
-isolating bootloader file-system assumptions. The target currently accepts the
-bootloader finding `BISRV.ASD`; the next blocker is the follow-up file-object
-geometry path deriving compatibility LBA `0x202020`.
+FSINFO sector, root directory, and `BIOS` directory. The original stock
+bootloader has a known file-object close bug that can leave the next
+`BISRV.ASD` open with a bad directory pointer on minimal synthetic media.
+`make smoke-stock-full-bugfix` uses the vendor bugfixed bootloader, verifies
+the CRC32/MPEG-2 check passes, enters the stock firmware UI, and mounts the SD
+card. `make smoke-stock-full-fat16` keeps a FAT16 comparison image because it
+is useful for isolating bootloader file-system assumptions.
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount
