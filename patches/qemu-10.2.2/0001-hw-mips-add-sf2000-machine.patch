@@ -1,6 +1,5 @@
-diff -ruN a/hw/mips/Kconfig b/hw/mips/Kconfig
---- a/hw/mips/Kconfig	2026-05-09 13:41:58.560212932 +0000
-+++ b/hw/mips/Kconfig	2026-05-09 13:41:58.564080038 +0000
+--- a/hw/mips/Kconfig
++++ b/hw/mips/Kconfig
 @@ -13,6 +13,11 @@
      select SERIAL_MM
      select SMBUS_EEPROM
@@ -13,9 +12,8 @@ diff -ruN a/hw/mips/Kconfig b/hw/mips/Kconfig
  config JAZZ
      bool
      default y
-diff -ruN a/hw/mips/meson.build b/hw/mips/meson.build
---- a/hw/mips/meson.build	2026-05-09 13:41:58.562276110 +0000
-+++ b/hw/mips/meson.build	2026-05-09 13:41:58.565673172 +0000
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
 @@ -4,6 +4,7 @@
  common_ss.add(when: 'CONFIG_LOONGSON3V', if_true: files('loongson3_bootp.c'))
  mips_ss.add(when: 'CONFIG_LOONGSON3V', if_true: files('loongson3_virt.c'))
@@ -24,10 +22,9 @@ diff -ruN a/hw/mips/meson.build b/hw/mips/meson.build
  mips_ss.add(when: 'CONFIG_MIPS_CPS', if_true: files('cps.c'))
  
  if 'CONFIG_TCG' in config_all_accel
-diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
---- a/hw/mips/sf2000.c	1970-01-01 00:00:00.000000000 +0000
-+++ b/hw/mips/sf2000.c	2026-05-09 13:41:58.567238848 +0000
-@@ -0,0 +1,434 @@
+--- a/hw/mips/sf2000.c
++++ b/hw/mips/sf2000.c
+@@ -0,0 +1,608 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -44,6 +41,7 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +#include "qapi/error.h"
 +#include "cpu.h"
 +#include "hw/boards.h"
++#include "hw/irq.h"
 +#include "hw/loader.h"
 +#include "hw/mips/mips.h"
 +#include "hw/qdev-properties.h"
@@ -63,8 +61,10 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +#define SF2000_RAM_BASE        0x00000000ULL
 +#define SF2000_RAM_DEFAULT     (128 * MiB)
 +#define SF2000_BOOT_BASE       0x1fc00000ULL
++#define SF2000_BOOT_ALIAS_BASE 0x0fc00000ULL
 +#define SF2000_BOOT_SIZE       (4 * MiB)
-+#define SF2000_ASD_LOAD_BASE   0x00000000ULL
++#define SF2000_ASD_SKIP        0x200ULL
++#define SF2000_ASD_LOAD_BASE   0x00000200ULL
 +#define SF2000_ASD_ENTRY       0x80001000ULL
 +#define SF2000_MMIO_BASE       0x10000000ULL
 +#define SF2000_MMIO_SIZE       0x0fc00000ULL
@@ -72,7 +72,53 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +#define SF2000_LCD_MMIO_SIZE   0x00001000ULL
 +#define SF2000_LCD_WIDTH       320
 +#define SF2000_LCD_HEIGHT      240
-+#define SF2000_HC15XX_CHIP_ID  0x3503
++#define SF2000_CHIP_ID_VALUE   0x1512a501
++#define SF2000_HC15XX_CHIP_ID  0x1512
++#define SF2000_UART1_BASE      0x18818600ULL
++#define SF2000_TIMER_BASE      0x18818a00ULL
++#define SF2000_TIMER_SIZE      0x00000080ULL
++#define SF2000_IRQ_STATUS1     0x18800030ULL
++#define SF2000_IRQ_ENABLE1     0x18800038ULL
++#define SF2000_TIMER5_BASE     0x18818a50ULL
++#define SF2000_SB_TIMER_BIT    22
++#define SF2000_SB_TIMER_IRQ    (1u << SF2000_SB_TIMER_BIT)
++#define SF2000_EIRQ3_LINE      3
++
++typedef struct SF2000RegDefault {
++    hwaddr addr;
++    uint32_t value;
++} SF2000RegDefault;
++
++static const SF2000RegDefault sf2000_reg_defaults[] = {
++    { 0x18800000, 0x1512a501 }, { 0x18800024, 0xffff0000 },
++    { 0x18800028, 0xffffffff }, { 0x1880002c, 0xffffffff },
++    { 0x18800038, 0x00480415 }, { 0x1880003c, 0x00000008 },
++    { 0x18800044, 0x00000100 }, { 0x18800048, 0xffbfff83 },
++    { 0x18800050, 0x07800102 }, { 0x18800054, 0x040004b2 },
++    { 0x18800058, 0x140004ff }, { 0x18800060, 0x00000f88 },
++    { 0x18800064, 0x0bc04040 }, { 0x18800068, 0x02000000 },
++    { 0x18800070, 0x80091717 }, { 0x18800074, 0x00000700 },
++    { 0x18800078, 0x00083700 }, { 0x1880007c, 0x000c00c0 },
++    { 0x18800080, 0x000023c0 }, { 0x18800084, 0xa00b4000 },
++    { 0x18800094, 0x000d0000 }, { 0x188000a4, 0x00002419 },
++    { 0x18800140, 0x18800140 }, { 0x18800144, 0x44554618 },
++    { 0x18800148, 0x08182080 }, { 0x1880014c, 0x30303006 },
++    { 0x18800150, 0x30030010 }, { 0x18800220, 0x01000002 },
++    { 0x18800224, 0x0000ffff }, { 0x18800230, 0x81a344c9 },
++    { 0x18800348, 0xffff8183 }, { 0x18800350, 0x00000083 },
++    { 0x18800354, 0x00080283 }, { 0x18800358, 0x0008feff },
++    { 0x18800380, 0x812b0900 }, { 0x18800384, 0x02000040 },
++    { 0x18800388, 0x0000005e }, { 0x188003cc, 0x00005555 },
++    { 0x18800470, 0x0021001a }, { 0x18800478, 0x011c000d },
++    { 0x18800480, 0x0022001a }, { 0x188004a0, 0x06060000 },
++    { 0x188004a4, 0x06060606 }, { 0x188004a8, 0x01060600 },
++    { 0x188004ac, 0x01010101 }, { 0x188004b0, 0x04040404 },
++    { 0x188004b4, 0x00000404 }, { 0x188004bc, 0x00000200 },
++    { 0x188004c0, 0x00000001 }, { 0x188004e4, 0x07000101 },
++    { 0x188004e8, 0x00000002 }, { 0x18800500, 0x06060000 },
++    { 0x18800504, 0x00060606 }, { 0x18800508, 0x06060606 },
++    { 0x1880050c, 0x00060606 }, { 0x1882e098, 0xc1000103 },
++};
 +
 +struct SF2000LCDState {
 +    SysBusDevice parent_obj;
@@ -102,6 +148,35 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +} SF2000RegState;
 +
 +static SF2000RegState sf2000_regs[256];
++static qemu_irq sf2000_eirq3;
++static uint32_t sf2000_timer5_aim;
++static uint32_t sf2000_timer5_ctrl;
++
++static uint32_t sf2000_timer_ticks(void)
++{
++    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000);
++}
++
++static bool sf2000_timer5_pending(void)
++{
++    uint32_t count;
++
++    if (!(sf2000_timer5_ctrl & BIT(2)) || !(sf2000_timer5_ctrl & BIT(4))) {
++        return false;
++    }
++
++    count = sf2000_timer_ticks();
++    return count - sf2000_timer5_aim < 0x80000000u;
++}
++
++static void sf2000_update_irq(void)
++{
++    if (!sf2000_eirq3) {
++        return;
++    }
++
++    qemu_set_irq(sf2000_eirq3, sf2000_timer5_pending());
++}
 +
 +static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
 +                            unsigned size)
@@ -117,14 +192,24 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +    uint64_t value = 0;
 +    unsigned i;
 +
-+    switch (full_addr) {
-+    case 0x18800000:
-+        value = SF2000_HC15XX_CHIP_ID << 16;
-+        break;
-+    case 0x18800002:
-+        value = SF2000_HC15XX_CHIP_ID;
-+        break;
-+    default:
++    if (full_addr == SF2000_IRQ_STATUS1) {
++        value = sf2000_timer5_pending() ? SF2000_SB_TIMER_IRQ : 0;
++    } else if (full_addr == SF2000_UART1_BASE + 5) {
++        value = 0x60; /* THR empty + transmitter empty. */
++    } else if (full_addr == SF2000_TIMER5_BASE) {
++        value = sf2000_timer_ticks();
++    } else if (full_addr == SF2000_TIMER5_BASE + 4) {
++        value = sf2000_timer5_aim;
++    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
++        value = sf2000_timer5_ctrl;
++        if (sf2000_timer5_pending()) {
++            value |= BIT(3);
++        }
++    } else if (full_addr >= SF2000_TIMER_BASE &&
++               full_addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE &&
++               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 0) {
++        value = sf2000_timer_ticks();
++    } else {
 +        for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
 +            if (sf2000_regs[i].valid &&
 +                sf2000_regs[i].addr == (full_addr & ~3u)) {
@@ -135,9 +220,21 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +                break;
 +            }
 +        }
-+        break;
++        if (i == ARRAY_SIZE(sf2000_regs)) {
++            for (i = 0; i < ARRAY_SIZE(sf2000_reg_defaults); i++) {
++                if (sf2000_reg_defaults[i].addr == (full_addr & ~3u)) {
++                    value = sf2000_reg_defaults[i].value >>
++                            ((full_addr & 3u) * 8u);
++                    if (size < 4) {
++                        value &= (1u << (size * 8)) - 1u;
++                    }
++                    break;
++                }
++            }
++        }
 +    }
 +
++    sf2000_update_irq();
 +    sf2000_log_mmio("mmio-read", full_addr, value, size);
 +    return value;
 +}
@@ -172,6 +269,13 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +                               (((uint32_t)value << shift) & mask);
 +    }
 +
++    if (full_addr == SF2000_TIMER5_BASE + 4) {
++        sf2000_timer5_aim = value;
++    } else if (full_addr == SF2000_TIMER5_BASE + 8) {
++        sf2000_timer5_ctrl = value & ~(uint32_t)BIT(3);
++    }
++
++    sf2000_update_irq();
 +    sf2000_log_mmio("mmio-write", full_addr, value, size);
 +}
 +
@@ -385,11 +489,15 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +{
 +    const char *bios = machine->firmware;
 +    MemoryRegion *boot = g_new(MemoryRegion, 1);
++    MemoryRegion *boot_alias = g_new(MemoryRegion, 1);
 +    int64_t size;
 +
 +    memory_region_init_rom(boot, NULL, "sf2000.bootrom", SF2000_BOOT_SIZE,
 +                           &error_fatal);
 +    memory_region_add_subregion(sysmem, SF2000_BOOT_BASE, boot);
++    memory_region_init_alias(boot_alias, NULL, "sf2000.bootrom-alias",
++                             boot, 0, SF2000_BOOT_SIZE);
++    memory_region_add_subregion(sysmem, SF2000_BOOT_ALIAS_BASE, boot_alias);
 +
 +    if (!bios) {
 +        warn_report("sf2000: no -bios supplied; boot ROM is blank");
@@ -408,7 +516,10 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +
 +static void sf2000_load_asd(MachineState *machine)
 +{
++    g_autofree uint8_t *contents = NULL;
++    gsize len;
 +    int64_t size;
++    GError *err = NULL;
 +
 +    loaderparams.kernel_filename = machine->kernel_filename;
 +    loaderparams.kernel_entry = SF2000_ASD_ENTRY;
@@ -417,17 +528,30 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +        return;
 +    }
 +
-+    size = load_image_targphys(machine->kernel_filename, SF2000_ASD_LOAD_BASE,
-+                               machine->ram_size, 0);
-+    if (size < 0) {
++    if (!g_file_get_contents(machine->kernel_filename, (char **)&contents,
++                             &len, &err)) {
 +        error_report("sf2000: failed to load ASD image '%s'",
 +                     machine->kernel_filename);
++        if (err) {
++            error_report("%s", err->message);
++            g_error_free(err);
++        }
++        exit(1);
++    }
++    if (len <= SF2000_ASD_SKIP ||
++        len - SF2000_ASD_SKIP > machine->ram_size - SF2000_ASD_LOAD_BASE) {
++        error_report("sf2000: invalid ASD size %" G_GSIZE_FORMAT, len);
 +        exit(1);
 +    }
 +
++    rom_add_blob_fixed("sf2000.asd", contents + SF2000_ASD_SKIP,
++                       len - SF2000_ASD_SKIP, SF2000_ASD_LOAD_BASE);
++    size = len - SF2000_ASD_SKIP;
++
 +    info_report("sf2000: loaded ASD %" PRId64 " bytes at 0x%08" PRIx64
-+                ", entry 0x%08" PRIx64 " from %s",
++                " skip=0x%08" PRIx64 ", entry 0x%08" PRIx64 " from %s",
 +                size, (uint64_t)SF2000_ASD_LOAD_BASE,
++                (uint64_t)SF2000_ASD_SKIP,
 +                (uint64_t)SF2000_ASD_ENTRY, machine->kernel_filename);
 +}
 +
@@ -461,6 +585,7 @@ diff -ruN a/hw/mips/sf2000.c b/hw/mips/sf2000.c
 +    clock_set_hz(cpuclk, 396000000);
 +    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
 +    cpu_mips_irq_init_cpu(cpu);
++    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];
 +    cpu_mips_clock_init(cpu);
 +    qemu_register_reset(sf2000_cpu_reset, cpu);
 +
