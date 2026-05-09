@@ -12,7 +12,7 @@ LOG ?= build/logs/sf2000.log
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=sd,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -22,6 +22,7 @@ help:
 		'  make deps          show required Alpine packages' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
+		'  make smoke-stock-bootloader verify stock bootloader reaches SD init' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
 		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
@@ -111,6 +112,16 @@ smoke: build
 		-d guest_errors,unimp -D build/logs/smoke.log \
 		> build/logs/smoke.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded' build/logs/smoke.console
+
+smoke-stock-bootloader: build
+	mkdir -p build/logs
+	timeout 15s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-bootloader.log \
+		> build/logs/smoke-stock-bootloader.console 2>&1 || test $$? -eq 124
+	grep -q 'mirrored bootloader .*flash+0x00005c00' build/logs/smoke-stock-bootloader.console
+	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-bootloader.log
+	grep -q 'uart: \[INFO\].SD init cost' build/logs/smoke-stock-bootloader.log
 
 smoke-stock-asd: build
 	mkdir -p build/logs

@@ -56,10 +56,17 @@ The stock ASD path defaults to:
 Run the current direct stock ASD bring-up smoke with:
 
 ```sh
+make smoke-stock-bootloader
 make smoke-stock-asd
 make smoke-stock-fatfs
 make smoke-stock-display
 ```
+
+`make smoke-stock-bootloader` starts the stock bootloader body from the flash
+partition recorded in the image `HEAD` table (`0x5c00`) and verifies that the
+bootloader reaches UART output and SD initialization. The direct reset-vector
+path still needs the vendor cache trampoline modelled before it can run without
+this helper entry.
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount

@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1260 @@
+@@ -0,0 +1,1281 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -66,6 +66,9 @@
 +#define SF2000_BOOT_BASE       0x1fc00000ULL
 +#define SF2000_BOOT_ALIAS_BASE 0x0fc00000ULL
 +#define SF2000_BOOT_SIZE       (4 * MiB)
++#define SF2000_BL_FLASH_OFF    0x00005c00ULL
++#define SF2000_BL_RAM_BASE     0x01000000ULL
++#define SF2000_BL_ENTRY        0x81000490ULL
 +#define SF2000_ASD_SKIP        0x200ULL
 +#define SF2000_ASD_LOAD_BASE   0x00000200ULL
 +#define SF2000_ASD_ENTRY       0x80001000ULL
@@ -179,6 +182,7 @@
 +static uint32_t sf2000_timer5_ctrl;
 +static int64_t sf2000_next_tick_ns;
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
++static bool sf2000_bootrom_ram_entry;
 +static uint8_t sf2000_sflash_cmd;
 +static uint32_t sf2000_sdio_arg;
 +static uint8_t sf2000_sdio_cmd;
@@ -1150,6 +1154,20 @@
 +        exit(1);
 +    }
 +    memcpy(sf2000_bootrom_bytes, contents, MIN((gsize)SF2000_BOOT_SIZE, len));
++    if (len > SF2000_BL_FLASH_OFF &&
++        len - SF2000_BL_FLASH_OFF <= machine->ram_size - SF2000_BL_RAM_BASE) {
++        gsize bootloader_len = len - SF2000_BL_FLASH_OFF;
++        rom_add_blob_fixed("sf2000.bootloader.ram",
++                           contents + SF2000_BL_FLASH_OFF, bootloader_len,
++                           SF2000_BL_RAM_BASE);
++        sf2000_bootrom_ram_entry = true;
++        info_report("sf2000: mirrored bootloader %" G_GSIZE_FORMAT
++                    " bytes from flash+0x%08" PRIx64
++                    " at 0x%08" PRIx64 ", entry 0x%08" PRIx64,
++                    bootloader_len, (uint64_t)SF2000_BL_FLASH_OFF,
++                    (uint64_t)SF2000_BL_RAM_BASE,
++                    (uint64_t)SF2000_BL_ENTRY);
++    }
 +
 +    info_report("sf2000: loaded %" PRId64 " bytes at 0x%08" PRIx64 " from %s",
 +                size, (uint64_t)SF2000_BOOT_BASE, bios);
@@ -1206,6 +1224,9 @@
 +    if (loaderparams.kernel_filename) {
 +        env->CP0_Status &= ~((1 << CP0St_BEV) | (1 << CP0St_ERL));
 +        env->active_tc.PC = loaderparams.kernel_entry;
++    } else if (sf2000_bootrom_ram_entry) {
++        env->CP0_Status &= ~((1 << CP0St_BEV) | (1 << CP0St_ERL));
++        env->active_tc.PC = SF2000_BL_ENTRY;
 +    }
 +}
 +
