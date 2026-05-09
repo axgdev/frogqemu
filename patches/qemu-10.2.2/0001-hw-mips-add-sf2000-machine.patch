@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1350 @@
+@@ -0,0 +1,1477 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -55,6 +55,7 @@
 +#include "system/blockdev.h"
 +#include "system/reset.h"
 +#include "system/dma.h"
++#include "ui/input.h"
 +#include "qom/object.h"
 +#include "target/mips/internal.h"
 +#include "ui/console.h"
@@ -99,6 +100,11 @@
 +#define SF2000_SDIO_IRQ_BIT    10
 +#define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
 +#define SF2000_EIRQ3_LINE      3
++#define SF2000_GPIO_L_IN       0x18800050ULL
++#define SF2000_GPIO_L_OUT      0x18800054ULL
++#define SF2000_KEY_DATA_BIT    23
++#define SF2000_KEY_CLK_BIT     24
++#define SF2000_KEY_COUNT       12
 +
 +typedef struct SF2000RegDefault {
 +    hwaddr addr;
@@ -205,6 +211,44 @@
 +static BlockBackend *sf2000_sdio_blk;
 +static char sf2000_uart_line[256];
 +static uint32_t sf2000_uart_line_len;
++static uint32_t sf2000_key_mask;
++static unsigned sf2000_key_shift_index;
++static uint32_t sf2000_gpio_l_out;
++
++typedef struct SF2000KeyMap {
++    QKeyCode qcode;
++    uint32_t mask;
++} SF2000KeyMap;
++
++enum {
++    SF2000_KEY_R = 0,
++    SF2000_KEY_Y,
++    SF2000_KEY_X,
++    SF2000_KEY_L,
++    SF2000_KEY_A,
++    SF2000_KEY_B,
++    SF2000_KEY_SELECT,
++    SF2000_KEY_START,
++    SF2000_KEY_UP,
++    SF2000_KEY_DOWN,
++    SF2000_KEY_LEFT,
++    SF2000_KEY_RIGHT,
++};
++
++static const SF2000KeyMap sf2000_key_map[] = {
++    { Q_KEY_CODE_RIGHT, BIT(SF2000_KEY_RIGHT) },
++    { Q_KEY_CODE_LEFT, BIT(SF2000_KEY_LEFT) },
++    { Q_KEY_CODE_UP, BIT(SF2000_KEY_UP) },
++    { Q_KEY_CODE_DOWN, BIT(SF2000_KEY_DOWN) },
++    { Q_KEY_CODE_RET, BIT(SF2000_KEY_START) },
++    { Q_KEY_CODE_BACKSPACE, BIT(SF2000_KEY_SELECT) },
++    { Q_KEY_CODE_Z, BIT(SF2000_KEY_B) },
++    { Q_KEY_CODE_X, BIT(SF2000_KEY_A) },
++    { Q_KEY_CODE_A, BIT(SF2000_KEY_Y) },
++    { Q_KEY_CODE_S, BIT(SF2000_KEY_X) },
++    { Q_KEY_CODE_Q, BIT(SF2000_KEY_L) },
++    { Q_KEY_CODE_W, BIT(SF2000_KEY_R) },
++};
 +
 +static uint32_t sf2000_timer_ticks(void)
 +{
@@ -305,6 +349,71 @@
 +                                                   ch : '.';
 +    }
 +}
++
++static uint32_t sf2000_gpio_l_sample(uint32_t value)
++{
++    unsigned index = sf2000_key_shift_index % SF2000_KEY_COUNT;
++
++    if (sf2000_key_mask & BIT(index)) {
++        value &= ~BIT(SF2000_KEY_DATA_BIT);
++    } else {
++        value |= BIT(SF2000_KEY_DATA_BIT);
++    }
++
++    return value;
++}
++
++static void sf2000_gpio_l_write(uint32_t value)
++{
++    bool old_clk = (sf2000_gpio_l_out & BIT(SF2000_KEY_CLK_BIT)) != 0;
++    bool new_clk = (value & BIT(SF2000_KEY_CLK_BIT)) != 0;
++
++    /*
++     * The SF2000 local keypad is a 12-bit active-low shift register on L23
++     * with clock on L24. Driving L23 low is the parallel-load phase used by
++     * UniFrog and the stock firmware before switching it back to input.
++     */
++    if (!(value & BIT(SF2000_KEY_DATA_BIT))) {
++        sf2000_key_shift_index = 0;
++    } else if (!old_clk && new_clk) {
++        sf2000_key_shift_index =
++            (sf2000_key_shift_index + 1) % SF2000_KEY_COUNT;
++    }
++
++    sf2000_gpio_l_out = value;
++}
++
++static void sf2000_keyboard_event(DeviceState *dev, QemuConsole *src,
++                                  InputEvent *evt)
++{
++    InputKeyEvent *key;
++    QKeyCode qcode;
++    unsigned i;
++
++    assert(evt->type == INPUT_EVENT_KIND_KEY);
++    key = evt->u.key.data;
++    qcode = qemu_input_key_value_to_qcode(key->key);
++
++    for (i = 0; i < ARRAY_SIZE(sf2000_key_map); i++) {
++        if (sf2000_key_map[i].qcode != qcode) {
++            continue;
++        }
++        if (key->down) {
++            sf2000_key_mask |= sf2000_key_map[i].mask;
++        } else {
++            sf2000_key_mask &= ~sf2000_key_map[i].mask;
++        }
++        qemu_log_mask(LOG_UNIMP, "sf2000: key qcode=%s down=%d mask=0x%08x\n",
++                      QKeyCode_str(qcode), key->down, sf2000_key_mask);
++        break;
++    }
++}
++
++static const QemuInputHandler sf2000_keyboard_handler = {
++    .name = "sf2000 keypad",
++    .mask = INPUT_EVENT_MASK_KEY,
++    .event = sf2000_keyboard_event,
++};
 +
 +static void sf2000_put_le16(uint8_t *p, uint16_t v)
 +{
@@ -614,6 +723,19 @@
 +        if (sf2000_sdio_irq_pending) {
 +            value |= SF2000_SDIO_IRQ;
 +        }
++    } else if ((full_addr & ~3u) == SF2000_GPIO_L_IN) {
++        value = 0x07800102;
++        for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++            if (sf2000_regs[i].valid && sf2000_regs[i].addr == SF2000_GPIO_L_IN) {
++                value = sf2000_regs[i].value;
++                break;
++            }
++        }
++        value = sf2000_gpio_l_sample(value);
++        value >>= ((full_addr & 3u) * 8u);
++        if (size < 4) {
++            value &= (1u << (size * 8)) - 1u;
++        }
 +    } else if (full_addr == SF2000_UART1_BASE + 5) {
 +        value = 0x60; /* THR empty + transmitter empty. */
 +    } else if (full_addr >= 0x1884c010 && full_addr < 0x1884c020) {
@@ -746,7 +868,10 @@
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
 +        sf2000_sdio_irq_pending = false;
-+    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
++    } else if (full_addr == SF2000_GPIO_L_OUT) {
++        sf2000_gpio_l_write(sf2000_regs[i].value);
++        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
++    } else if (full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
 +    } else if ((full_addr & ~0x80u) == 0x18808304) {
 +        sf2000_gma_present(value);
@@ -1331,6 +1456,8 @@
 +    lcd = qdev_new(TYPE_SF2000_LCD);
 +    sysbus_realize_and_unref(SYS_BUS_DEVICE(lcd), &error_fatal);
 +    sysbus_mmio_map(SYS_BUS_DEVICE(lcd), 0, SF2000_LCD_MMIO_BASE);
++    qemu_input_handler_activate(qemu_input_handler_register(
++        lcd, &sf2000_keyboard_handler));
 +
 +    sf2000_sdio_blk = blk_by_name("sd0");
 +    dinfo = sf2000_sdio_blk ? NULL : drive_get(IF_SD, 0, 0);
