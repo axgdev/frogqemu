@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,888 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -134,7 +134,27 @@
 +    uint32_t format;
 +    uint32_t control;
 +    bool redraw;
++
++    uint32_t gpio54;
++    uint32_t gpio354;
++    bool panel_wr;
++    bool panel_rs;
++    uint16_t panel_cmd;
++    uint16_t panel_args[4];
++    uint8_t panel_arg_count;
++    uint16_t panel_x0;
++    uint16_t panel_x1;
++    uint16_t panel_y0;
++    uint16_t panel_y1;
++    uint16_t panel_x;
++    uint16_t panel_y;
++    uint32_t panel_cmd_count;
++    uint32_t panel_pixel_count;
++    uint32_t panel_pixels[SF2000_LCD_WIDTH * SF2000_LCD_HEIGHT];
 +};
++
++static SF2000LCDState *sf2000_lcd;
++static uint32_t sf2000_rgb565_to_surface(uint16_t pix);
 +
 +static struct {
 +    const char *kernel_filename;
@@ -152,6 +172,8 @@
 +static uint32_t sf2000_timer5_aim;
 +static uint32_t sf2000_timer5_ctrl;
 +static int64_t sf2000_next_tick_ns;
++static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
++static uint8_t sf2000_sflash_cmd;
 +
 +static uint32_t sf2000_timer_ticks(void)
 +{
@@ -213,6 +235,142 @@
 +                  kind, addr, size, value);
 +}
 +
++static void sf2000_panel_update_rect(SF2000LCDState *s, uint16_t x, uint16_t y)
++{
++    DisplaySurface *surface;
++    uint32_t *dst;
++
++    if (!s || x >= SF2000_LCD_WIDTH || y >= SF2000_LCD_HEIGHT) {
++        return;
++    }
++
++    surface = qemu_console_surface(s->con);
++    if (surface_bits_per_pixel(surface) != 32 ||
++        surface_width(surface) != SF2000_LCD_WIDTH ||
++        surface_height(surface) != SF2000_LCD_HEIGHT) {
++        qemu_console_resize(s->con, SF2000_LCD_WIDTH, SF2000_LCD_HEIGHT);
++        surface = qemu_console_surface(s->con);
++    }
++    if (surface_bits_per_pixel(surface) != 32) {
++        return;
++    }
++
++    dst = (uint32_t *)(surface_data(surface) + y * surface_stride(surface));
++    dst[x] = s->panel_pixels[y * SF2000_LCD_WIDTH + x];
++    dpy_gfx_update(s->con, x, y, 1, 1);
++}
++
++static void sf2000_panel_commit_arg(SF2000LCDState *s, uint16_t value)
++{
++    uint16_t *args = s->panel_args;
++
++    switch (s->panel_cmd) {
++    case 0x2a:
++        if (s->panel_arg_count < ARRAY_SIZE(s->panel_args)) {
++            args[s->panel_arg_count++] = value;
++        }
++        if (s->panel_arg_count == 4) {
++            s->panel_x0 = ((args[0] & 0xff) << 8) | (args[1] & 0xff);
++            s->panel_x1 = ((args[2] & 0xff) << 8) | (args[3] & 0xff);
++        }
++        break;
++    case 0x2b:
++        if (s->panel_arg_count < ARRAY_SIZE(s->panel_args)) {
++            args[s->panel_arg_count++] = value;
++        }
++        if (s->panel_arg_count == 4) {
++            s->panel_y0 = ((args[0] & 0xff) << 8) | (args[1] & 0xff);
++            s->panel_y1 = ((args[2] & 0xff) << 8) | (args[3] & 0xff);
++        }
++        break;
++    case 0x2c:
++        if (s->panel_x < SF2000_LCD_WIDTH && s->panel_y < SF2000_LCD_HEIGHT) {
++            s->panel_pixels[s->panel_y * SF2000_LCD_WIDTH + s->panel_x] =
++                sf2000_rgb565_to_surface(value);
++            s->panel_pixel_count++;
++            if (s->panel_pixel_count <= 16 ||
++                (s->panel_pixel_count % 4096) == 0) {
++                qemu_log_mask(LOG_UNIMP,
++                              "sf2000: panel-pixel n=%u x=%u y=%u rgb565=0x%04x\n",
++                              s->panel_pixel_count, s->panel_x, s->panel_y,
++                              value);
++            }
++            sf2000_panel_update_rect(s, s->panel_x, s->panel_y);
++        }
++        if (s->panel_x >= s->panel_x1) {
++            s->panel_x = s->panel_x0;
++            if (s->panel_y < s->panel_y1) {
++                s->panel_y++;
++            }
++        } else {
++            s->panel_x++;
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++static void sf2000_panel_latch(SF2000LCDState *s, uint16_t value)
++{
++    if (s->panel_rs) {
++        sf2000_panel_commit_arg(s, value);
++        return;
++    }
++
++    s->panel_cmd = value & 0xff;
++    s->panel_arg_count = 0;
++    s->panel_cmd_count++;
++    if (s->panel_cmd_count <= 64 || s->panel_cmd == 0x2c) {
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: panel-cmd cmd=0x%02x raw=0x%04x count=%u\n",
++                      s->panel_cmd, value, s->panel_cmd_count);
++    }
++    if (s->panel_cmd == 0x2c) {
++        s->panel_x = s->panel_x0;
++        s->panel_y = s->panel_y0;
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: panel-ramwr x=%u..%u y=%u..%u pixels=%u\n",
++                      s->panel_x0, s->panel_x1, s->panel_y0, s->panel_y1,
++                      s->panel_pixel_count);
++    }
++}
++
++static uint16_t sf2000_panel_data_from_gpio(SF2000LCDState *s)
++{
++    return ((s->gpio54 >> 2) & 0x1f) |
++           ((s->gpio354 >> 4) & 0x7e0) |
++           ((s->gpio354 & 0x7c) << 9);
++}
++
++static void sf2000_panel_gpio_write(hwaddr full_addr, uint32_t value)
++{
++    SF2000LCDState *s = sf2000_lcd;
++    bool old_wr;
++    bool new_wr;
++
++    if (!s) {
++        return;
++    }
++
++    if (full_addr == 0x18800054) {
++        s->gpio54 = value;
++    } else if (full_addr == 0x18800354) {
++        s->gpio354 = value;
++    } else {
++        return;
++    }
++
++    old_wr = s->panel_wr;
++    new_wr = !!(s->gpio54 & BIT(7));
++    s->panel_rs = !!(s->gpio354 & BIT(1));
++    s->panel_wr = new_wr;
++
++    if (!old_wr && new_wr) {
++        sf2000_panel_latch(s, sf2000_panel_data_from_gpio(s));
++    }
++}
++
 +static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
 +{
 +    hwaddr full_addr = SF2000_MMIO_BASE + addr;
@@ -223,6 +381,12 @@
 +        value = sf2000_timer5_pending() ? SF2000_SB_TIMER_IRQ : 0;
 +    } else if (full_addr == SF2000_UART1_BASE + 5) {
 +        value = 0x60; /* THR empty + transmitter empty. */
++    } else if (full_addr == 0x1880f04b) {
++        value = 0; /* AUX controller command/status idle. */
++    } else if (full_addr == 0x1882e09a) {
++        value = 0x40; /* SFLASH RX ready. */
++    } else if (full_addr == 0x1882e0a0) {
++        value = 0x00000001; /* SFLASH DMA/PIO completion. */
 +    } else if (full_addr == SF2000_TIMER5_BASE) {
 +        value = sf2000_timer_ticks();
 +    } else if (full_addr == SF2000_TIMER5_BASE + 4) {
@@ -315,6 +479,12 @@
 +               ((full_addr - SF2000_TIMER_BASE) & 0xf) == 8 &&
 +               (value & BIT(3))) {
 +        sf2000_timer_ack();
++    } else if (full_addr == 0x18800054 || full_addr == 0x18800354) {
++        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
++    } else if (full_addr == 0x1882e098) {
++        sf2000_sflash_cmd = value & 0xff;
++        qemu_log_mask(LOG_UNIMP, "sf2000: sflash-cmd cmd=0x%02x\n",
++                      sf2000_sflash_cmd);
 +    }
 +
 +    sf2000_update_irq();
@@ -325,6 +495,57 @@
 +    .read = sf2000_unimp_read,
 +    .write = sf2000_unimp_write,
 +    .endianness = DEVICE_NATIVE_ENDIAN,
++    .valid = {
++        .min_access_size = 1,
++        .max_access_size = 4,
++        .unaligned = true,
++    },
++};
++
++static uint64_t sf2000_sflash_direct_read(void *opaque, hwaddr addr,
++                                          unsigned size)
++{
++    static const uint8_t jedec_id[] = { 0x20, 0x40, 0x13 };
++    uint64_t value = 0;
++    unsigned i;
++
++    for (i = 0; i < size; i++) {
++        uint8_t byte;
++
++        switch (sf2000_sflash_cmd) {
++        case 0x05: /* Read status register. */
++            byte = 0;
++            break;
++        case 0x9f: /* Read JEDEC ID. */
++            byte = jedec_id[(addr + i) % ARRAY_SIZE(jedec_id)];
++            break;
++        default:
++            byte = sf2000_bootrom_bytes[(addr + i) % SF2000_BOOT_SIZE];
++            break;
++        }
++        value |= (uint64_t)byte << (i * 8);
++    }
++
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: sflash-read cmd=0x%02x off=0x%08" HWADDR_PRIx
++                  " size=%u value=0x%08" PRIx64 "\n",
++                  sf2000_sflash_cmd, addr, size, value);
++    return value;
++}
++
++static void sf2000_sflash_direct_write(void *opaque, hwaddr addr,
++                                       uint64_t value, unsigned size)
++{
++    qemu_log_mask(LOG_UNIMP,
++                  "sf2000: sflash-write off=0x%08" HWADDR_PRIx
++                  " size=%u value=0x%08" PRIx64 "\n",
++                  addr, size, value);
++}
++
++static const MemoryRegionOps sf2000_sflash_direct_ops = {
++    .read = sf2000_sflash_direct_read,
++    .write = sf2000_sflash_direct_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
 +    .valid = {
 +        .min_access_size = 1,
 +        .max_access_size = 4,
@@ -496,6 +717,9 @@
 +    s->as = &address_space_memory;
 +    s->con = graphic_console_init(dev, 0, &sf2000_lcd_gfx_ops, s);
 +    qemu_console_resize(s->con, s->width, s->height);
++    s->panel_x1 = SF2000_LCD_WIDTH - 1;
++    s->panel_y1 = SF2000_LCD_HEIGHT - 1;
++    sf2000_lcd = s;
 +
 +    memory_region_init_io(&s->iomem, OBJECT(s), &sf2000_lcd_ops, s,
 +                          TYPE_SF2000_LCD, SF2000_LCD_MMIO_SIZE);
@@ -531,15 +755,18 @@
 +{
 +    const char *bios = machine->firmware;
 +    MemoryRegion *boot = g_new(MemoryRegion, 1);
-+    MemoryRegion *boot_alias = g_new(MemoryRegion, 1);
++    MemoryRegion *flash_direct = g_new(MemoryRegion, 1);
++    g_autofree uint8_t *contents = NULL;
++    gsize len;
 +    int64_t size;
++    GError *err = NULL;
 +
 +    memory_region_init_rom(boot, NULL, "sf2000.bootrom", SF2000_BOOT_SIZE,
 +                           &error_fatal);
 +    memory_region_add_subregion(sysmem, SF2000_BOOT_BASE, boot);
-+    memory_region_init_alias(boot_alias, NULL, "sf2000.bootrom-alias",
-+                             boot, 0, SF2000_BOOT_SIZE);
-+    memory_region_add_subregion(sysmem, SF2000_BOOT_ALIAS_BASE, boot_alias);
++    memory_region_init_io(flash_direct, NULL, &sf2000_sflash_direct_ops, NULL,
++                          "sf2000.sflash-direct", SF2000_BOOT_SIZE);
++    memory_region_add_subregion(sysmem, SF2000_BOOT_ALIAS_BASE, flash_direct);
 +
 +    if (!bios) {
 +        warn_report("sf2000: no -bios supplied; boot ROM is blank");
@@ -551,6 +778,15 @@
 +        error_report("sf2000: failed to load firmware '%s'", bios);
 +        exit(1);
 +    }
++    if (!g_file_get_contents(bios, (char **)&contents, &len, &err)) {
++        error_report("sf2000: failed to mirror firmware '%s'", bios);
++        if (err) {
++            error_report("%s", err->message);
++            g_error_free(err);
++        }
++        exit(1);
++    }
++    memcpy(sf2000_bootrom_bytes, contents, MIN((gsize)SF2000_BOOT_SIZE, len));
 +
 +    info_report("sf2000: loaded %" PRId64 " bytes at 0x%08" PRIx64 " from %s",
 +                size, (uint64_t)SF2000_BOOT_BASE, bios);
@@ -630,6 +866,7 @@
 +    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];
 +    sf2000_timer_ack();
 +    cpu_mips_clock_init(cpu);
++    cpu->env.CP0_IntCtl = 0;
 +    qemu_register_reset(sf2000_cpu_reset, cpu);
 +
 +    memory_region_init_ram(ram, NULL, "sf2000.ram", machine->ram_size,
