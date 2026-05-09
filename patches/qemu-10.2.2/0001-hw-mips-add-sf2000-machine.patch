@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,985 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -274,7 +274,7 @@
 +        sf2000_sdio_resp[3] = 0x33445566;
 +        break;
 +    case 3:
-+        sf2000_sdio_resp[0] = 0x00000100;
++        sf2000_sdio_resp[0] = 0x00010000; /* R6: RCA 1, status 0 in response-byte window. */
 +        break;
 +    case 8:
 +        sf2000_sdio_resp[0] = 0xaa010000;
@@ -283,13 +283,22 @@
 +        sf2000_sdio_resp[0] = 0x400e0032;
 +        sf2000_sdio_resp[1] = 0x5b590000;
 +        sf2000_sdio_resp[2] = 0xedc87f80;
-+        sf2000_sdio_resp[3] = 0x0a404000;
++        sf2000_sdio_resp[3] = 0x40000032;
 +        break;
 +    case 41:
-+        sf2000_sdio_resp[0] = 0x80ffc000; /* ACMD41 OCR ready, high capacity. */
++        sf2000_sdio_resp[0] = 0xffffffff; /* Permissive OCR: ready and all supported voltage bits. */
++        sf2000_sdio_resp[1] = 0xffffffff;
 +        break;
 +    case 55:
-+        sf2000_sdio_resp[0] = 0x20010000; /* APP_CMD accepted. */
++        sf2000_sdio_resp[0] = 0x20000000; /* APP_CMD accepted in response-byte window. */
++        break;
++    case 7:
++    case 16:
++    case 17:
++    case 18:
++    case 24:
++    case 25:
++        sf2000_sdio_resp[0] = 0;
 +        break;
 +    default:
 +        sf2000_sdio_resp[0] = 0x00000900;
