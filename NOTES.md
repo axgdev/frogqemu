@@ -19,9 +19,15 @@ Known local firmware files:
 ```
 
 The current machine consumes the SPI boot image through `-bios` and can inject
-the stock ASD directly with `-kernel` for faster bring-up. SD reads use the
-QEMU `IF_SD` block backend when `SD_IMAGE=/path/to/sd.img` is passed through
-the Makefile, otherwise the board serves a synthetic FAT probe card.
+the stock ASD directly with `-kernel` for faster bring-up. SD reads use an
+unconnected QEMU block backend named `sd0` when `SD_IMAGE=/path/to/sd.img` is
+passed through the Makefile, otherwise the board serves a synthetic FAT probe
+card.
+
+`tools/mksf2000sd.c` creates `build/sf2000-stock.sd.img` for the full-chain
+bootloader diagnostic. That image contains `/BIOS/bisrv.asd`; the bootloader
+currently reads the attached image's MBR and volume sector but does not yet
+walk into the generated FAT directory sectors.
 
 ## Reverse Engineering Loop
 

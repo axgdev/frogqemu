@@ -3,6 +3,8 @@ QEMU_TARBALL := qemu-$(QEMU_VERSION).tar.xz
 QEMU_URL := https://download.qemu.org/$(QEMU_TARBALL)
 QEMU_SRC := .cache/qemu-$(QEMU_VERSION)
 QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
+MKSD := build/mksf2000sd
+STOCK_SD_IMAGE := build/sf2000-stock.sd.img
 
 FIRMWARE ?= /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
@@ -10,9 +12,9 @@ GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
 SD_IMAGE ?=
-SD_ARGS = $(if $(SD_IMAGE),-drive if=sd,file=$(SD_IMAGE),format=raw,)
+SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build run-vnc run-headless boot-stock-asd debug smoke smoke-stock-bootloader smoke-stock-full smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -23,6 +25,7 @@ help:
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-stock-bootloader verify stock bootloader reaches SD init' \
+		'  make smoke-stock-full diagnose stock bootloader /BIOS/bisrv.asd load' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
 		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
@@ -74,6 +77,13 @@ build: $(QEMU_BIN)
 $(QEMU_BIN): $(QEMU_SRC)/build/build.ninja
 	ninja -C $(QEMU_SRC)/build qemu-system-mipsel
 
+$(MKSD): tools/mksf2000sd.c
+	mkdir -p $(dir $@)
+	$(CC) -O2 -Wall -Wextra -o $@ $<
+
+$(STOCK_SD_IMAGE): $(MKSD) $(ASD)
+	$(MKSD) $(ASD) $@
+
 run-vnc: build
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
@@ -122,6 +132,17 @@ smoke-stock-bootloader: build
 	grep -q 'mirrored bootloader .*flash+0x00005c00' build/logs/smoke-stock-bootloader.console
 	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-bootloader.log
 	grep -q 'uart: \[INFO\].SD init cost' build/logs/smoke-stock-bootloader.log
+
+smoke-stock-full: build $(STOCK_SD_IMAGE)
+	mkdir -p build/logs
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-full.log \
+		> build/logs/smoke-stock-full.console 2>&1 || test $$? -eq 124
+	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-full.log
+	grep -q 'uart: \[INFO\].SD init cost' build/logs/smoke-stock-full.log
+	grep -Eq 'uart: \[FS\]successed!|gma-present|uart: \[ERR\].No Upgrade file -- 0:BIOS/bisrv.asd' build/logs/smoke-stock-full.log
 
 smoke-stock-asd: build
 	mkdir -p build/logs

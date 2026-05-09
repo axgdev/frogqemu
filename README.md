@@ -57,6 +57,7 @@ Run the current direct stock ASD bring-up smoke with:
 
 ```sh
 make smoke-stock-bootloader
+make smoke-stock-full
 make smoke-stock-asd
 make smoke-stock-fatfs
 make smoke-stock-display
@@ -67,6 +68,13 @@ partition recorded in the image `HEAD` table (`0x5c00`) and verifies that the
 bootloader reaches UART output and SD initialization. The direct reset-vector
 path still needs the vendor cache trampoline modelled before it can run without
 this helper entry.
+
+`make smoke-stock-full` builds `build/sf2000-stock.sd.img`, a tiny FAT image
+containing `/BIOS/bisrv.asd`, then boots the stock bootloader against that raw
+image. This is the current full-chain diagnostic target. It proves block-backed
+SD reads from the bootloader path, but the stock FatFs fork still does not walk
+past the volume sector in this emulation, so the target currently accepts that
+known stop point until the exact SD/FAT geometry contract is finished.
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount
@@ -99,8 +107,10 @@ vnc://host:5901
 Logs are written to `build/logs/sf2000.log`.
 
 Without `SD_IMAGE`, the SD controller serves a tiny synthetic FAT32-like probe
-card that is enough for the stock firmware to mount. To attach a real raw SD
-image:
+card that is enough for the stock firmware to mount in direct ASD mode. To
+attach a real raw SD image, QEMU uses an unconnected block backend named `sd0`
+because this machine model owns the controller directly rather than exposing a
+generic QEMU SD bus:
 
 ```sh
 make run-vnc SD_IMAGE=/path/to/sd.img
@@ -145,7 +155,9 @@ Implemented:
 - A minimal timer/interrupt path sufficient for the stock ASD scheduler loop.
 - UART line capture to the QEMU log.
 - A minimal SDIO command and DMA read path, backed by either a raw `IF_SD`
-  image or a synthetic FAT probe card.
+  image named `sd0` or a synthetic FAT probe card.
+- A host-side `tools/mksf2000sd.c` helper that creates a tiny raw FAT image
+  with `/BIOS/bisrv.asd` for bootloader diagnostics.
 
 Not implemented yet:
 
