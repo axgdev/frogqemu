@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1525 @@
+@@ -0,0 +1,1615 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -83,9 +83,15 @@
 +#define SF2000_CHIP_ID_VALUE   0x1512a501
 +#define SF2000_HC15XX_CHIP_ID  0x1512
 +#define SF2000_UART1_BASE      0x18818600ULL
++#define SF2000_ADC_BASE        0x18818400ULL
++#define SF2000_ADC_SIZE        0x00000100ULL
++#define SF2000_ADC_SAMPLE      200
++#define SF2000_WDT_BASE        0x18818500ULL
++#define SF2000_WDT_SIZE        0x00000100ULL
 +#define SF2000_TIMER_BASE      0x18818a00ULL
 +#define SF2000_TIMER_SIZE      0x00000080ULL
 +#define SF2000_IRQ_STATUS1     0x18800030ULL
++#define SF2000_IRQ_STATUS2     0x18800034ULL
 +#define SF2000_IRQ_ENABLE1     0x18800038ULL
 +#define SF2000_TIMER_COUNT     8
 +#define SF2000_TIMER_STEP      0x10
@@ -196,6 +202,7 @@
 +static uint32_t sf2000_timer_aim[SF2000_TIMER_COUNT];
 +static uint32_t sf2000_timer_ctrl[SF2000_TIMER_COUNT];
 +static int64_t sf2000_next_tick_ns;
++static uint32_t sf2000_adc_ctrl[4];
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
 +static bool sf2000_bootrom_ram_entry;
 +static uint8_t sf2000_sflash_cmd;
@@ -328,9 +335,63 @@
 +static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
 +                            unsigned size)
 +{
++    /*
++     * These are intentionally modelled as hot polling registers. Logging every
++     * byte poll makes the firmware trace much harder to mine for new gaps.
++     */
++    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
++        addr == 0x1884c001 || addr == 0x1884c00b || addr == 0x1884c030 ||
++        addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2) {
++        return;
++    }
++
 +    qemu_log_mask(LOG_UNIMP, "sf2000: %s addr=0x%08" HWADDR_PRIx
 +                  " size=%u value=0x%08" PRIx64 "\n",
 +                  kind, addr, size, value);
++}
++
++static bool sf2000_adc_decode(hwaddr full_addr, unsigned *index,
++                              unsigned *offset)
++{
++    hwaddr adc_off;
++
++    if (full_addr < SF2000_ADC_BASE ||
++        full_addr >= SF2000_ADC_BASE + SF2000_ADC_SIZE) {
++        return false;
++    }
++
++    adc_off = full_addr - SF2000_ADC_BASE;
++    *index = adc_off / 4;
++    *offset = adc_off & 3;
++    return *index < ARRAY_SIZE(sf2000_adc_ctrl);
++}
++
++static uint64_t sf2000_adc_read(hwaddr full_addr, unsigned size)
++{
++    unsigned index;
++    unsigned offset;
++    uint32_t value;
++
++    if (!sf2000_adc_decode(full_addr, &index, &offset)) {
++        return 0;
++    }
++
++    value = sf2000_adc_ctrl[index];
++    if (index == 0) {
++        value &= ~0x00ff0100u;
++        value |= (SF2000_ADC_SAMPLE << 16) | BIT(8);
++    }
++    value >>= offset * 8;
++    if (size < 4) {
++        value &= (1u << (size * 8)) - 1u;
++    }
++    return value;
++}
++
++static bool sf2000_wdt_decode(hwaddr full_addr)
++{
++    return full_addr >= SF2000_WDT_BASE &&
++           full_addr < SF2000_WDT_BASE + SF2000_WDT_SIZE;
 +}
 +
 +static void sf2000_uart_put(uint8_t ch)
@@ -771,6 +832,8 @@
 +        if (sf2000_sdio_irq_pending) {
 +            value |= SF2000_SDIO_IRQ;
 +        }
++    } else if (full_addr == SF2000_IRQ_STATUS2) {
++        value = 0;
 +    } else if ((full_addr & ~3u) == SF2000_GPIO_L_IN) {
 +        value = 0x07800102;
 +        for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -786,6 +849,11 @@
 +        }
 +    } else if (full_addr == SF2000_UART1_BASE + 5) {
 +        value = 0x60; /* THR empty + transmitter empty. */
++    } else if (full_addr >= SF2000_ADC_BASE &&
++               full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
++        value = sf2000_adc_read(full_addr, size);
++    } else if (sf2000_wdt_decode(full_addr)) {
++        value = 0;
 +    } else if (full_addr >= 0x1884c010 && full_addr < 0x1884c020) {
 +        unsigned off = full_addr - 0x1884c010;
 +        value = sf2000_sdio_resp[off >> 2] >> ((off & 3) * 8);
@@ -872,6 +940,8 @@
 +    unsigned empty = ARRAY_SIZE(sf2000_regs);
 +    unsigned timer_index;
 +    unsigned timer_offset;
++    unsigned adc_index;
++    unsigned adc_offset;
 +    unsigned i;
 +
 +    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -913,6 +983,26 @@
 +            break;
 +        default:
 +            break;
++        }
++    } else if (sf2000_adc_decode(full_addr, &adc_index, &adc_offset)) {
++        uint32_t old = sf2000_adc_ctrl[adc_index];
++
++        if (size >= 4) {
++            sf2000_adc_ctrl[adc_index] = value;
++        } else {
++            uint32_t adc_mask = (1u << (size * 8)) - 1u;
++            unsigned adc_shift = adc_offset * 8u;
++
++            sf2000_adc_ctrl[adc_index] =
++                (old & ~(adc_mask << adc_shift)) |
++                (((uint32_t)value & adc_mask) << adc_shift);
++        }
++        if (adc_index == 0 && (value & BIT(8))) {
++            sf2000_adc_ctrl[0] &= ~BIT(8);
++        }
++    } else if (sf2000_wdt_decode(full_addr)) {
++        if ((full_addr & 0xff) == 0x04 && value == 0) {
++            qemu_log_mask(LOG_UNIMP, "sf2000: watchdog disabled\n");
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
 +        sf2000_sdio_irq_pending = false;
