@@ -72,9 +72,11 @@ this helper entry.
 `make smoke-stock-full` builds `build/sf2000-stock.sd.img`, a tiny FAT image
 containing `/BIOS/bisrv.asd`, then boots the stock bootloader against that raw
 image. This is the current full-chain diagnostic target. It proves block-backed
-SD reads from the bootloader path, but the stock FatFs fork still does not walk
-past the volume sector in this emulation, so the target currently accepts that
-known stop point until the exact SD/FAT geometry contract is finished.
+SD reads from the bootloader path. The generated image uses a small FAT16
+layout because that matches the stock bootloader path better than the earlier
+FAT32 probe. The target currently accepts the bootloader finding `BISRV.ASD`;
+the next blocker is the follow-up close/read path tripping the bootloader's
+exception handler after the first file-sector read.
 
 `make smoke-stock-fatfs` boots the stock ASD far enough to exercise the SDIO
 DMA read path and confirm that the stock firmware reaches its FatFs mount

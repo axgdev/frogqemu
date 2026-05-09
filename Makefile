@@ -142,7 +142,7 @@ smoke-stock-full: build $(STOCK_SD_IMAGE)
 		> build/logs/smoke-stock-full.console 2>&1 || test $$? -eq 124
 	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-full.log
 	grep -q 'uart: \[INFO\].SD init cost' build/logs/smoke-stock-full.log
-	grep -Eq 'uart: \[FS\]successed!|gma-present|uart: \[ERR\].No Upgrade file -- 0:BIOS/bisrv.asd' build/logs/smoke-stock-full.log
+	grep -Eq 'uart: \[FS\]successed!|gma-present|uart: \[INFO\].----A BISRV.ASD|uart: \[ERR\].No Upgrade file -- 0:BIOS/bisrv.asd' build/logs/smoke-stock-full.log
 
 smoke-stock-asd: build
 	mkdir -p build/logs

@@ -25,9 +25,12 @@ passed through the Makefile, otherwise the board serves a synthetic FAT probe
 card.
 
 `tools/mksf2000sd.c` creates `build/sf2000-stock.sd.img` for the full-chain
-bootloader diagnostic. That image contains `/BIOS/bisrv.asd`; the bootloader
-currently reads the attached image's MBR and volume sector but does not yet
-walk into the generated FAT directory sectors.
+bootloader diagnostic. That image contains `/BIOS/bisrv.asd` in a small FAT16
+layout. The bootloader currently opens `0:BIOS`, finds `BISRV.ASD`, reads one
+file sector, then enters its exception handler while closing or advancing the
+file object. The image also mirrors the ASD at LBA `0x202020`, the current bad
+first-file LBA calculated by the bootloader path, so later hardware contracts
+can be exposed while that geometry bug is isolated.
 
 ## Reverse Engineering Loop
 
