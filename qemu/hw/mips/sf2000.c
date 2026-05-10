@@ -107,7 +107,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_GE_HQ_FIRST     (SF2000_GE_BASE + 0x10)
 #define SF2000_GE_HQ_LAST      (SF2000_GE_BASE + 0x14)
 #define SF2000_GE_QUEUE_DUMP_WORDS 64
-#define SF2000_GE_QUEUE_DUMP_DEFAULT 96
+#define SF2000_GE_QUEUE_DUMP_DEFAULT 0
 #define SF2000_GMA_BASE        0x18808000ULL
 #define SF2000_GMA_SIZE        0x00003000ULL
 #define SF2000_TIMER_BASE      0x18818a00ULL
@@ -497,11 +497,13 @@ static void sf2000_trace_pc_landmark(void)
                             (uint32_t)cpu->env.active_tc.gpr[31],
                             (uint32_t)cpu->env.active_tc.gpr[29]);
                 }
-                qemu_log_mask(LOG_UNIMP,
-                              "sf2000: pc-landmark %s pc=0x%08x ra=0x%08x sp=0x%08x\n",
-                              landmark->name, pc,
-                              (uint32_t)cpu->env.active_tc.gpr[31],
-                              (uint32_t)cpu->env.active_tc.gpr[29]);
+                if (stderr_trace) {
+                    qemu_log_mask(LOG_UNIMP,
+                                  "sf2000: pc-landmark %s pc=0x%08x ra=0x%08x sp=0x%08x\n",
+                                  landmark->name, pc,
+                                  (uint32_t)cpu->env.active_tc.gpr[31],
+                                  (uint32_t)cpu->env.active_tc.gpr[29]);
+                }
                 sf2000_last_pc_landmark = landmark->name;
             }
             return;
@@ -929,15 +931,12 @@ static bool sf2000_trace_sflash(void)
 static bool sf2000_sysio_quiet_addr(hwaddr addr)
 {
     /*
-     * Clock, reset, and pinmux setup registers are noisy during stock display
-     * bring-up but are already backed by the generic read/write register store.
-     * Keep them visible only when explicitly researching the SYSIO block.
+     * SYSIO clock, reset, pinmux, GPIO-control, and interrupt-mask registers
+     * are noisy during stock display/storage bring-up but are backed by the
+     * generic read/write register store or explicit GPIO paths. Keep them
+     * visible only when explicitly researching the SYSIO block.
      */
-    return addr == 0x18800060 || addr == 0x18800064 ||
-           addr == 0x18800078 || addr == 0x1880007c ||
-           addr == 0x18800080 || addr == 0x18800084 ||
-           addr == 0x18800094 ||
-           (addr >= 0x188004a0 && addr <= 0x1880051c);
+    return addr >= SF2000_MSYSIO_BASE && addr <= 0x1880051c;
 }
 
 static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
@@ -1047,10 +1046,15 @@ static unsigned sf2000_ge_node_dump_limit(void)
     unsigned limit;
 
     if (!limit_s || !limit_s[0]) {
-        return 12;
+        return 0;
     }
     limit = g_ascii_strtoull(limit_s, NULL, 0);
     return limit;
+}
+
+static bool sf2000_trace_ge(void)
+{
+    return sf2000_ge_dump_limit() > 0;
 }
 
 static bool sf2000_ge_read_node(uint32_t first, uint32_t *node,
@@ -1137,9 +1141,11 @@ static void sf2000_ge_execute_node(uint32_t *node, uint32_t words)
      */
     if (src && width == 16 && height == 16) {
         sf2000_ge_memcpy(dst, src, 16 * 16 * 4);
-        qemu_log_mask(LOG_UNIMP,
-                      "sf2000: ge-copy-palette dst=0x%08x src=0x%08x\n",
-                      dst, src);
+        if (sf2000_trace_ge()) {
+            qemu_log_mask(LOG_UNIMP,
+                          "sf2000: ge-copy-palette dst=0x%08x src=0x%08x\n",
+                          dst, src);
+        }
     } else if (src && dst && width && height) {
         if (fmt == 0x0c) {
             len = (size_t)width * height;
@@ -1150,9 +1156,11 @@ static void sf2000_ge_execute_node(uint32_t *node, uint32_t words)
         }
         if (len) {
             sf2000_ge_memcpy(dst, src, len);
-            qemu_log_mask(LOG_UNIMP,
-                          "sf2000: ge-copy dst=0x%08x src=0x%08x fmt=0x%x %ux%u len=%zu\n",
-                          dst, src, fmt, width, height, len);
+            if (sf2000_trace_ge()) {
+                qemu_log_mask(LOG_UNIMP,
+                              "sf2000: ge-copy dst=0x%08x src=0x%08x fmt=0x%x %ux%u len=%zu\n",
+                              dst, src, fmt, width, height, len);
+            }
         }
     } else if (!src && dst && width && height) {
         if (fmt == 0x0c) {
@@ -1164,9 +1172,11 @@ static void sf2000_ge_execute_node(uint32_t *node, uint32_t words)
         }
         if (len) {
             sf2000_ge_memset(dst, 0, len);
-            qemu_log_mask(LOG_UNIMP,
-                          "sf2000: ge-clear dst=0x%08x fmt=0x%x %ux%u len=%zu\n",
-                          dst, fmt, width, height, len);
+            if (sf2000_trace_ge()) {
+                qemu_log_mask(LOG_UNIMP,
+                              "sf2000: ge-clear dst=0x%08x fmt=0x%x %ux%u len=%zu\n",
+                              dst, fmt, width, height, len);
+            }
         }
     }
 }
