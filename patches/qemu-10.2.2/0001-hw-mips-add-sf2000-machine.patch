@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2283 @@
+@@ -0,0 +1,2295 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -545,6 +545,7 @@
 +        addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||
 +        addr == 0x18800058 || addr == 0x18800358 ||
 +        (addr == SF2000_GPIO_L_IN && g_str_equal(kind, "mmio-read")) ||
++        (addr == SF2000_GPIO_L_ISR && g_str_equal(kind, "mmio-read")) ||
 +        (addr == SF2000_GPIO_R_IN && g_str_equal(kind, "mmio-read")) ||
 +        (addr == SF2000_GPIO_R_ISR && g_str_equal(kind, "mmio-read")) ||
 +        addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2 ||
@@ -1354,9 +1355,10 @@
 +
 +    if (full_addr == SF2000_IRQ_STATUS1) {
 +        bool timer_pending = sf2000_timer5_pending();
++        bool gpio_vsync_pending = sf2000_gpio_l_vsync_pending();
 +
 +        value = timer_pending ? SF2000_SB_TIMER_IRQ : 0;
-+        if (sf2000_gpio_l_vsync_pending()) {
++        if (gpio_vsync_pending) {
 +            value |= SF2000_GPIO_IRQ;
 +        }
 +        if (sf2000_uart1_irq_pending()) {
@@ -1375,6 +1377,16 @@
 +         */
 +        if (timer_pending && !sf2000_timer5_configured()) {
 +            sf2000_timer_ack();
++        }
++        if (gpio_vsync_pending) {
++            /*
++             * The emulated ST7789V TE signal is an edge, not a level held by a
++             * real GPIO pad. Stock firmware uses this aggregate GPIO IRQ as a
++             * wake source during panel bring-up and does not run a GPIO child
++             * handler here, so clear the synthetic edge after it has appeared
++             * once in the south-bridge IRQ status.
++             */
++            sf2000_mmio_set32(SF2000_GPIO_L_ISR, 0);
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS2) {
 +        value = 0;
