@@ -3,6 +3,7 @@ QEMU_TARBALL := qemu-$(QEMU_VERSION).tar.xz
 QEMU_URL := https://download.qemu.org/$(QEMU_TARBALL)
 QEMU_SRC := .cache/qemu-$(QEMU_VERSION)
 QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
+QEMU_JOBS ?=
 MKSD := build/mksf2000sd
 STOCK_SD_IMAGE := build/sf2000-stock.sd.img
 STOCK_SD_IMAGE_FAT16 := build/sf2000-stock-fat16.sd.img
@@ -21,10 +22,14 @@ CAPTURE_DELAY ?= 60
 SCREENSHOT ?= build/screenshots/sf2000-stock-capture.ppm
 GMA_DUMP_DIR ?= build/screenshots/gma
 GMA_DUMP_LIMIT ?= 16
+VIDEO_DIR ?= build/video/vanilla-ui
+VIDEO ?= $(VIDEO_DIR)/sf2000-vanilla-ui.mp4
+VIDEO_FRAMERATE ?= 12
+VIDEO_GMA_DUMP_LIMIT ?= 300
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps build-info fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -32,6 +37,7 @@ help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  make deps          show required Alpine packages' \
+		'  make build-info    show host/build configuration' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-input   verify HMP/VNC keyboard events reach the keypad' \
@@ -47,6 +53,7 @@ help:
 		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
 		'  make capture-stock-ui write screendump and GMA frames to build/screenshots' \
 		'  make capture-vanilla-ui download vanilla OS files and capture GMA frames' \
+		'  make capture-vanilla-video write a short MP4 from captured GMA frames' \
 		'  make vanilla-sd    build a generated FAT32 image from the vanilla OS zip' \
 		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
 		'  make debug         run paused with GDB stub on :1234' \
@@ -57,7 +64,17 @@ help:
 deps:
 	@printf '%s\n' \
 		'apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib' \
-		'optional for vanilla-sd: apk add --no-cache dosfstools mtools unzip'
+		'optional for vanilla-sd: apk add --no-cache dosfstools mtools unzip' \
+		'optional for captures/video: apk add --no-cache imagemagick ffmpeg'
+
+build-info:
+	@printf 'host: %s\n' "$$(uname -m)"
+	@printf 'qemu: %s\n' '$(QEMU_VERSION)'
+	@printf 'binary: %s\n' '$(QEMU_BIN)'
+	@printf 'jobs: %s\n' '$(if $(QEMU_JOBS),$(QEMU_JOBS),ninja default)'
+	@printf 'firmware: %s\n' '$(FIRMWARE)'
+	@printf 'bugfix firmware: %s\n' '$(FIRMWARE_BUGFIX)'
+	@printf 'asd: %s\n' '$(ASD)'
 
 fetch: $(QEMU_SRC)/.fetched
 
@@ -77,7 +94,7 @@ $(QEMU_SRC)/.patched: $(QEMU_SRC)/.fetched patches/qemu-$(QEMU_VERSION)/0001-hw-
 
 configure: $(QEMU_SRC)/build/build.ninja
 
-$(QEMU_SRC)/build/build.ninja: $(QEMU_SRC)/.patched
+$(QEMU_SRC)/build/build.ninja: | $(QEMU_SRC)/.patched
 	cd $(QEMU_SRC) && ./configure \
 		--target-list=mipsel-softmmu \
 		--disable-docs \
@@ -93,7 +110,7 @@ $(QEMU_SRC)/build/build.ninja: $(QEMU_SRC)/.patched
 build: $(QEMU_BIN)
 
 $(QEMU_BIN): $(QEMU_SRC)/build/build.ninja
-	ninja -C $(QEMU_SRC)/build qemu-system-mipsel
+	ninja $(if $(QEMU_JOBS),-j$(QEMU_JOBS),) -C $(QEMU_SRC)/build qemu-system-mipsel
 
 $(MKSD): tools/mksf2000sd.c
 	mkdir -p $(dir $@)
@@ -172,6 +189,32 @@ capture-vanilla-ui: build $(VANILLA_SD_IMAGE)
 		> build/logs/capture-vanilla-ui.console 2>&1
 	@printf 'wrote %s\n' '$(SCREENSHOT)'
 	@find $(GMA_DUMP_DIR) -maxdepth 1 -type f -name 'sf2000-gma-*.ppm' -print | sort | tail -5
+
+capture-vanilla-video: build $(VANILLA_SD_IMAGE)
+	command -v ffmpeg >/dev/null
+	rm -rf $(VIDEO_DIR)
+	mkdir -p $(VIDEO_DIR) build/logs
+	(sleep $(CAPTURE_DELAY); printf 'sendkey right 800\n'; sleep 2; \
+		printf 'sendkey down 800\n'; sleep 2; printf 'sendkey ret 800\n'; \
+		sleep 10; printf 'quit\n') | \
+		SF2000_GMA_DUMP_DIR=$(VIDEO_DIR) \
+		SF2000_GMA_DUMP_LIMIT=$(VIDEO_GMA_DUMP_LIMIT) \
+		$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
+		-display none -serial none -monitor stdio \
+		-d guest_errors,unimp -D build/logs/capture-vanilla-video.log \
+		> build/logs/capture-vanilla-video.console 2>&1
+	ffmpeg -y -hide_banner -loglevel warning -framerate $(VIDEO_FRAMERATE) \
+		-i '$(VIDEO_DIR)/sf2000-gma-%04d.ppm' \
+		-vf 'scale=640:480:flags=neighbor,format=yuv420p' \
+		-movflags +faststart $(VIDEO)
+	@if command -v magick >/dev/null 2>&1; then \
+		magick '$(VIDEO_DIR)/sf2000-gma-latest.ppm' '$(VIDEO_DIR)/sf2000-gma-latest.png'; \
+	elif command -v convert >/dev/null 2>&1; then \
+		convert '$(VIDEO_DIR)/sf2000-gma-latest.ppm' '$(VIDEO_DIR)/sf2000-gma-latest.png'; \
+	fi
+	@printf 'wrote %s\n' '$(VIDEO)'
+	@printf 'latest frame: %s\n' '$(VIDEO_DIR)/sf2000-gma-latest.ppm'
 
 debug: build
 	mkdir -p $(dir $(LOG))

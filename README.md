@@ -17,6 +17,20 @@ On Alpine:
 apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib
 ```
 
+Optional tools for generated vanilla SD-card images and captures:
+
+```sh
+apk add --no-cache dosfstools mtools unzip imagemagick ffmpeg
+```
+
+On Debian or Ubuntu x86_64 hosts, the equivalent starting point is:
+
+```sh
+sudo apt-get install build-essential curl meson ninja-build patch pkg-config \
+  libglib2.0-dev libpixman-1-dev python3-venv python3-pip \
+  dosfstools mtools unzip imagemagick ffmpeg
+```
+
 The debug target expects the project toolchain GDB at:
 
 ```sh
@@ -34,6 +48,27 @@ make smoke
 
 `make build` downloads QEMU 10.2.2 into `.cache/`, applies the local patch,
 configures only `mipsel-softmmu`, and builds `qemu-system-mipsel`.
+Use `make build-info` to print the host architecture, firmware paths, and
+QEMU binary path that will be used. Use `QEMU_JOBS=<n>` to cap parallelism on
+small machines, for example `make build QEMU_JOBS=4`.
+
+The machine model is target-MIPS, not host-architecture-specific. Building on
+an x86_64 Linux host produces a native x86_64 `qemu-system-mipsel` binary at
+the same path:
+
+```sh
+make build
+file .cache/qemu-10.2.2/build/qemu-system-mipsel
+```
+
+Copy or keep the firmware/SD paths available on that host, then run the same
+targets. For VNC from a headless x86_64 machine:
+
+```sh
+make run-vnc VNC=0.0.0.0:1 SD_IMAGE=/path/to/sd.img
+```
+
+Connect to `vnc://host:5901`.
 
 The default firmware path is:
 
@@ -62,6 +97,7 @@ make smoke-stock-full-bugfix
 make smoke-stock-asd
 make smoke-stock-fatfs
 make smoke-stock-display
+make smoke-input
 ```
 
 `make smoke-stock-bootloader` starts the stock bootloader body from the flash
@@ -90,6 +126,10 @@ success message.
 scanout path and emits both the CLUT8 splash/menu descriptor and later RGB565
 framebuffer descriptor. The emulator currently bridges the ST7789 panel init
 sequence to QEMU display output by decoding those GMA descriptor writes.
+
+`make smoke-input` checks that QEMU monitor/VNC key events reach the emulated
+SF2000 keypad. The stock launcher uses an active-low L23/L24 shift register,
+so this is a separate hardware-contract check from generic QEMU input.
 
 ## Run With VNC
 
@@ -121,6 +161,32 @@ generic QEMU SD bus:
 ```sh
 make run-vnc SD_IMAGE=/path/to/sd.img
 make boot-stock-asd SD_IMAGE=/path/to/sd.img
+```
+
+## Capture Frames and Video
+
+For a stock vanilla UI frame sequence:
+
+```sh
+make capture-vanilla-ui CAPTURE_DELAY=120 GMA_DUMP_LIMIT=120
+```
+
+The most useful frame is usually the GMA dump, not QEMU's generic screendump:
+
+```text
+build/screenshots/gma/sf2000-gma-latest.ppm
+```
+
+To record a short MP4 from GMA-presented frames:
+
+```sh
+make capture-vanilla-video CAPTURE_DELAY=120 VIDEO_GMA_DUMP_LIMIT=300
+```
+
+The video target writes:
+
+```text
+build/video/vanilla-ui/sf2000-vanilla-ui.mp4
 ```
 
 ## Debug
@@ -162,15 +228,21 @@ Implemented:
 - UART line capture to the QEMU log.
 - A minimal SDIO command and DMA read path, backed by either a raw `IF_SD`
   image named `sd0` or a synthetic FAT probe card.
+- GPIO keypad input through the L23/L24 shift-register contract, including
+  stock launcher navigation from QEMU monitor/VNC key events.
+- GMA descriptor scanout for the stock launcher, including CLUT8 blocks,
+  RGB565 blocks, GE-backed redraws, and 640x480-to-320x240 source scaling.
+- Optional GMA frame dumps suitable for still-image comparison and MP4
+  generation.
 - A host-side `tools/mksf2000sd.c` helper that creates a tiny raw FAT image
   with `/BIOS/bisrv.asd` for bootloader diagnostics.
 
 Not implemented yet:
 
-- A complete HC15xx display controller and panel model.
-- GPIO keys, audio, SPI/NAND layout, writes to SD media, and full controller
-  timing semantics.
-- ASD package loading.
+- A complete HC15xx display controller and panel timing model.
+- Audio, USB, SPI/NAND layout, and full low-power/standby behavior.
+- Full SD controller timing semantics.
+- Game/content launch fidelity beyond the current stock-menu bring-up path.
 
 The first practical milestone is to run stock firmware far enough to collect
 unknown MMIO accesses and map them back to the real SF2000 drivers.
