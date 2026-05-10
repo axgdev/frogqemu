@@ -903,8 +903,12 @@ static uint64_t sf2000_usb_read(hwaddr full_addr, unsigned size)
     value = sf2000_usb_regs[index][offset >> 2];
     /*
      * The HC15xx DTS exposes two MUSB-like host/peripheral controller windows.
-     * This is an idle shell: no cable/device is attached, endpoint interrupt
-     * state is clear, and the session/connect status reads as disconnected.
+     * On the SF2000 DB-B210 board USB0 is routed to the micro USB connector
+     * and USB1 is routed to the USB-A connector. Hardware probes currently
+     * show both HCRTOS root hubs as initialized and powered, but disconnected,
+     * so this remains an idle shell: no cable/device is attached, endpoint
+     * interrupt state is clear, and the session/connect status reads as
+     * disconnected.
      */
     switch (offset) {
     case 0x00: /* FAddr/Power byte lane. */
