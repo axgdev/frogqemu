@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2891 @@
+@@ -0,0 +1,2906 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -250,6 +250,8 @@
 +};
 +
 +static SF2000LCDState *sf2000_lcd;
++static uint32_t sf2000_rgb565_lut[UINT16_MAX + 1u];
++static bool sf2000_rgb565_lut_ready;
 +static uint32_t sf2000_rgb565_to_surface(uint16_t pix);
 +static void sf2000_gma_present(uint32_t dmba_addr);
 +static bool sf2000_mmio_get32(hwaddr addr, uint32_t *value);
@@ -1024,16 +1026,20 @@
 +
 +static void sf2000_ge_memset(uint32_t dst, uint8_t value, size_t len)
 +{
-+    uint8_t *buf;
++    uint8_t buf[4096];
++    size_t done = 0;
 +
 +    if (!dst || !len) {
 +        return;
 +    }
-+    buf = g_malloc(len);
-+    memset(buf, value, len);
-+    address_space_write(&address_space_memory, dst, MEMTXATTRS_UNSPECIFIED,
-+                        buf, len);
-+    g_free(buf);
++    memset(buf, value, sizeof(buf));
++    while (done < len) {
++        size_t chunk = MIN(sizeof(buf), len - done);
++
++        address_space_write(&address_space_memory, dst + done,
++                            MEMTXATTRS_UNSPECIFIED, buf, chunk);
++        done += chunk;
++    }
 +}
 +
 +static void sf2000_ge_memcpy(uint32_t dst, uint32_t src, size_t len)
@@ -2284,14 +2290,23 @@
 +
 +static uint32_t sf2000_rgb565_to_surface(uint16_t pix)
 +{
-+    uint32_t r = (pix >> 11) & 0x1f;
-+    uint32_t g = (pix >> 5) & 0x3f;
-+    uint32_t b = pix & 0x1f;
++    if (G_UNLIKELY(!sf2000_rgb565_lut_ready)) {
++        unsigned i;
 +
-+    r = (r << 3) | (r >> 2);
-+    g = (g << 2) | (g >> 4);
-+    b = (b << 3) | (b >> 2);
-+    return 0xff000000u | (r << 16) | (g << 8) | b;
++        for (i = 0; i < ARRAY_SIZE(sf2000_rgb565_lut); i++) {
++            uint32_t r = (i >> 11) & 0x1f;
++            uint32_t g = (i >> 5) & 0x3f;
++            uint32_t b = i & 0x1f;
++
++            r = (r << 3) | (r >> 2);
++            g = (g << 2) | (g >> 4);
++            b = (b << 3) | (b >> 2);
++            sf2000_rgb565_lut[i] = 0xff000000u | (r << 16) | (g << 8) | b;
++        }
++        sf2000_rgb565_lut_ready = true;
++    }
++
++    return sf2000_rgb565_lut[pix];
 +}
 +
 +static uint32_t sf2000_argb8888_to_surface(uint32_t pix)
