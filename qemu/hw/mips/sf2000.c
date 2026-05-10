@@ -874,6 +874,18 @@ static void sf2000_irq_poll_timer_cb(void *opaque)
               NANOSECONDS_PER_SECOND / 1000);
 }
 
+static bool sf2000_trace_sdio(void)
+{
+    static int trace = -1;
+
+    if (trace < 0) {
+        const char *env = g_getenv("SF2000_TRACE_SDIO");
+
+        trace = env && env[0] && g_strcmp0(env, "0") != 0;
+    }
+    return trace != 0;
+}
+
 static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
                             unsigned size)
 {
@@ -890,7 +902,8 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
         (addr >= SF2000_GE_BASE && addr < SF2000_GE_BASE + SF2000_GE_SIZE) ||
         (addr >= SF2000_GMA_BASE &&
          addr < SF2000_GMA_BASE + SF2000_GMA_SIZE) ||
-        (addr >= 0x1884c000 && addr < 0x1884c040) ||
+        (addr >= 0x1884c000 && addr < 0x1884c040 &&
+         !sf2000_trace_sdio()) ||
         (addr >= 0x1882e098 && addr < 0x1882e0a4) ||
         addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||
         addr == 0x18800058 || addr == 0x18800358 ||
