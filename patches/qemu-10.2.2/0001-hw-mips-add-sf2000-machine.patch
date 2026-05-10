@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,1858 @@
+@@ -0,0 +1,2118 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -110,6 +110,15 @@
 +#define SF2000_ADC_SAMPLE      200
 +#define SF2000_WDT_BASE        0x18818500ULL
 +#define SF2000_WDT_SIZE        0x00000100ULL
++#define SF2000_GE_BASE         0x18806000ULL
++#define SF2000_GE_SIZE         0x00000100ULL
++#define SF2000_GE_CTRL         (SF2000_GE_BASE + 0x00)
++#define SF2000_GE_START        (SF2000_GE_BASE + 0x04)
++#define SF2000_GE_STATUS       (SF2000_GE_BASE + 0x08)
++#define SF2000_GE_HQ_FIRST     (SF2000_GE_BASE + 0x10)
++#define SF2000_GE_HQ_LAST      (SF2000_GE_BASE + 0x14)
++#define SF2000_GE_QUEUE_DUMP_WORDS 64
++#define SF2000_GE_QUEUE_DUMP_DEFAULT 96
 +#define SF2000_TIMER_BASE      0x18818a00ULL
 +#define SF2000_TIMER_SIZE      0x00000080ULL
 +#define SF2000_IRQ_STATUS1     0x18800030ULL
@@ -252,6 +261,7 @@
 +static unsigned sf2000_key_shift_index;
 +static uint32_t sf2000_gpio_l_out;
 +static unsigned sf2000_gma_dump_count;
++static unsigned sf2000_ge_queue_dump_count;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
@@ -432,6 +442,237 @@
 +    qemu_log_mask(LOG_UNIMP, "sf2000: %s addr=0x%08" HWADDR_PRIx
 +                  " size=%u value=0x%08" PRIx64 "\n",
 +                  kind, addr, size, value);
++}
++
++static bool sf2000_mmio_get32(hwaddr addr, uint32_t *value)
++{
++    unsigned i;
++
++    addr &= ~3u;
++    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++        if (sf2000_regs[i].valid && sf2000_regs[i].addr == addr) {
++            *value = sf2000_regs[i].value;
++            return true;
++        }
++    }
++    for (i = 0; i < ARRAY_SIZE(sf2000_reg_defaults); i++) {
++        if (sf2000_reg_defaults[i].addr == addr) {
++            *value = sf2000_reg_defaults[i].value;
++            return true;
++        }
++    }
++    *value = 0;
++    return false;
++}
++
++static void sf2000_mmio_set32(hwaddr addr, uint32_t value)
++{
++    unsigned i;
++    unsigned empty = ARRAY_SIZE(sf2000_regs);
++
++    addr &= ~3u;
++    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++        if (sf2000_regs[i].valid && sf2000_regs[i].addr == addr) {
++            sf2000_regs[i].value = value;
++            return;
++        }
++        if (!sf2000_regs[i].valid && empty == ARRAY_SIZE(sf2000_regs)) {
++            empty = i;
++        }
++    }
++    if (empty != ARRAY_SIZE(sf2000_regs)) {
++        sf2000_regs[empty].addr = addr;
++        sf2000_regs[empty].value = value;
++        sf2000_regs[empty].valid = true;
++    }
++}
++
++static bool sf2000_ge_decode(hwaddr full_addr)
++{
++    return full_addr >= SF2000_GE_BASE &&
++           full_addr < SF2000_GE_BASE + SF2000_GE_SIZE;
++}
++
++static unsigned sf2000_ge_dump_limit(void)
++{
++    const char *limit_s = g_getenv("SF2000_GE_DUMP_LIMIT");
++    unsigned limit;
++
++    if (!limit_s || !limit_s[0]) {
++        return SF2000_GE_QUEUE_DUMP_DEFAULT;
++    }
++    limit = g_ascii_strtoull(limit_s, NULL, 0);
++    return limit;
++}
++
++static bool sf2000_ge_read_node(uint32_t first, uint32_t *node,
++                                uint32_t words)
++{
++    uint32_t i;
++
++    for (i = 0; i < words; i++) {
++        if (address_space_read(&address_space_memory, first + i * 4u,
++                               MEMTXATTRS_UNSPECIFIED, &node[i],
++                               sizeof(node[i])) != MEMTX_OK) {
++            return false;
++        }
++        node[i] = le32_to_cpu(node[i]);
++    }
++    return true;
++}
++
++static void sf2000_ge_memset(uint32_t dst, uint8_t value, size_t len)
++{
++    uint8_t *buf;
++
++    if (!dst || !len) {
++        return;
++    }
++    buf = g_malloc(len);
++    memset(buf, value, len);
++    address_space_write(&address_space_memory, dst, MEMTXATTRS_UNSPECIFIED,
++                        buf, len);
++    g_free(buf);
++}
++
++static void sf2000_ge_memcpy(uint32_t dst, uint32_t src, size_t len)
++{
++    uint8_t *buf;
++
++    if (!dst || !src || !len) {
++        return;
++    }
++    buf = g_malloc(len);
++    if (address_space_read(&address_space_memory, src, MEMTXATTRS_UNSPECIFIED,
++                           buf, len) == MEMTX_OK) {
++        address_space_write(&address_space_memory, dst,
++                            MEMTXATTRS_UNSPECIFIED, buf, len);
++    }
++    g_free(buf);
++}
++
++static void sf2000_ge_execute_node(uint32_t *node, uint32_t words)
++{
++    uint32_t dst;
++    uint32_t src;
++    uint32_t fmt;
++    uint32_t width;
++    uint32_t height;
++    size_t len;
++
++    if (words < 26 || node[0] != 0x0201ffff) {
++        return;
++    }
++
++    dst = node[2];
++    src = node[6];
++    fmt = node[13] & 0xff;
++    width = node[17] >> 16;
++    height = node[17] & 0xffff;
++
++    /*
++     * This command subset is intentionally small and trace-derived:
++     *
++     * - 16x16 source nodes copy 256 ARGB8888 palette entries into the GMA
++     *   palette buffers referenced by the display descriptor.
++     * - Full-screen zero-source nodes clear the eventual GMA bitmap. The stock
++     *   firmware emits these while switching between CLUT8 and RGB565 boot
++     *   surfaces before the menu assets are drawn.
++     *
++     * Unknown nodes are still logged, then treated as completed. That keeps the
++     * boot trace moving while preserving enough evidence for the next hardware
++     * primitive.
++     */
++    if (src && width == 16 && height == 16) {
++        sf2000_ge_memcpy(dst, src, 16 * 16 * 4);
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: ge-copy-palette dst=0x%08x src=0x%08x\n",
++                      dst, src);
++    } else if (src && dst && width && height) {
++        if (fmt == 0x0c) {
++            len = (size_t)width * height;
++        } else if (fmt == 0x01 || fmt == 0x06) {
++            len = (size_t)width * height * 2;
++        } else {
++            len = 0;
++        }
++        if (len) {
++            sf2000_ge_memcpy(dst, src, len);
++            qemu_log_mask(LOG_UNIMP,
++                          "sf2000: ge-copy dst=0x%08x src=0x%08x fmt=0x%x %ux%u len=%zu\n",
++                          dst, src, fmt, width, height, len);
++        }
++    } else if (!src && dst && width && height) {
++        if (fmt == 0x0c) {
++            len = (size_t)width * height;
++        } else if (fmt == 0x01 || fmt == 0x06) {
++            len = (size_t)width * height * 2;
++        } else {
++            len = 0;
++        }
++        if (len) {
++            sf2000_ge_memset(dst, 0, len);
++            qemu_log_mask(LOG_UNIMP,
++                          "sf2000: ge-clear dst=0x%08x fmt=0x%x %ux%u len=%zu\n",
++                          dst, fmt, width, height, len);
++        }
++    }
++}
++
++static void sf2000_ge_complete_queue(void)
++{
++    uint32_t first;
++    uint32_t last;
++    uint32_t words;
++    uint32_t node[SF2000_GE_QUEUE_DUMP_WORDS];
++    unsigned dump_limit;
++    unsigned i;
++
++    /*
++     * The HCRTOS GE driver programs HQ first/last pointers at 0x10/0x14 and
++     * then writes bit 1 to 0x04. Real hardware DMA-executes the command node
++     * range and clears the busy state. We currently model completion and dump
++     * the first queue once so the command format can be implemented from real
++     * stock traces.
++     */
++    sf2000_mmio_get32(SF2000_GE_HQ_FIRST, &first);
++    sf2000_mmio_get32(SF2000_GE_HQ_LAST, &last);
++    if (!first || !last || last < first) {
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: ge-start empty first=0x%08x last=0x%08x\n",
++                      first, last);
++        sf2000_mmio_set32(SF2000_GE_STATUS, 0);
++        return;
++    }
++
++    words = MIN((last - first) / 4u + 1u, (uint32_t)SF2000_GE_QUEUE_DUMP_WORDS);
++    if (sf2000_ge_read_node(first, node, words)) {
++        sf2000_ge_execute_node(node, words);
++    }
++
++    dump_limit = sf2000_ge_dump_limit();
++    if (sf2000_ge_queue_dump_count < dump_limit) {
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: ge-start[%u] first=0x%08x last=0x%08x words=%u dst=0x%08x src=0x%08x fmt=0x%x wh=0x%08x aux=0x%08x\n",
++                      sf2000_ge_queue_dump_count, first, last, words,
++                      words > 2 ? node[2] : 0, words > 6 ? node[6] : 0,
++                      words > 13 ? node[13] : 0, words > 17 ? node[17] : 0,
++                      words > 25 ? node[25] : 0);
++        if (sf2000_ge_queue_dump_count < 12) {
++            for (i = 0; i < words; i++) {
++                qemu_log_mask(LOG_UNIMP, "sf2000: ge-node[%02u]=0x%08x\n",
++                              i, node[i]);
++            }
++        }
++        if (!words) {
++            qemu_log_mask(LOG_UNIMP, "sf2000: ge-node[%02u]=0x%08x\n",
++                          0, 0);
++        }
++        sf2000_ge_queue_dump_count++;
++    }
++
++    sf2000_mmio_set32(SF2000_GE_STATUS, 0);
++    sf2000_mmio_set32(SF2000_GE_HQ_FIRST, last);
 +}
 +
 +static bool sf2000_adc_decode(hwaddr full_addr, unsigned *index,
@@ -1050,6 +1291,17 @@
 +    } else if (full_addr == 0x1884c030) {
 +        value = sf2000_sdio_xfer_done ? 0x2c :
 +                (sf2000_sdio_xfer_busy ? 0x21 : 0x20);
++    } else if (sf2000_ge_decode(full_addr)) {
++        uint32_t ge_value;
++
++        sf2000_mmio_get32(full_addr, &ge_value);
++        if ((full_addr & ~3u) == SF2000_GE_STATUS) {
++            ge_value &= ~BIT(31); /* GE command queue idle/done. */
++        }
++        value = ge_value >> ((full_addr & 3u) * 8u);
++        if (size < 4) {
++            value &= (1u << (size * 8)) - 1u;
++        }
 +    } else if (full_addr == SF2000_TIMER_BASE + 0x08 &&
 +               sf2000_sdio_callback_pending) {
 +        value = sf2000_timer_ctrl[0] | SF2000_TIMER_CTRL_INT;
@@ -1213,6 +1465,14 @@
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
 +    } else if (full_addr == 0x18800354) {
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
++    } else if (sf2000_ge_decode(full_addr)) {
++        if ((full_addr & ~3u) == SF2000_GE_CTRL) {
++            sf2000_mmio_set32(SF2000_GE_CTRL, sf2000_regs[i].value &
++                              ~BIT(31));
++        } else if ((full_addr & ~3u) == SF2000_GE_START &&
++                   (sf2000_regs[i].value & BIT(1))) {
++            sf2000_ge_complete_queue();
++        }
 +    } else if ((full_addr & ~0x80u) == 0x18808304) {
 +        sf2000_gma_present(value);
 +    } else if (full_addr == SF2000_UART1_BASE) {

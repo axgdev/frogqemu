@@ -24,7 +24,7 @@ GMA_DUMP_LIMIT ?= 16
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -38,6 +38,7 @@ help:
 		'  make smoke-stock-bootloader verify stock bootloader reaches SD init' \
 		'  make smoke-stock-full diagnose stock bootloader FAT32 /BIOS/bisrv.asd load' \
 		'  make smoke-stock-full-bugfix verify fixed stock bootloader reaches firmware UI' \
+		'  make smoke-stock-full-vanilla verify fixed bootloader mounts vanilla OS image' \
 		'  make smoke-stock-full-fat16 run the same bootloader path on FAT16' \
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
@@ -235,6 +236,19 @@ smoke-stock-full-bugfix: build $(STOCK_SD_IMAGE)
 	grep -q 'gma-present .*mode=12' build/logs/smoke-stock-full-bugfix.log
 	grep -q 'gma-present .*mode=6' build/logs/smoke-stock-full-bugfix.log
 	grep -q 'uart: \[FS\]mount: /dev/sda1 -> /mnt/sda1' build/logs/smoke-stock-full-bugfix.log
+
+smoke-stock-full-vanilla: build $(VANILLA_SD_IMAGE)
+	mkdir -p build/logs
+	timeout 150s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-stock-full-vanilla.log \
+		> build/logs/smoke-stock-full-vanilla.console 2>&1 || test $$? -eq 124
+	grep -q 'uart:  Hichip Bootloader' build/logs/smoke-stock-full-vanilla.log
+	grep -q 'uart: \[INFO\].CRC check pass !' build/logs/smoke-stock-full-vanilla.log
+	grep -q 'gma-present .*mode=12' build/logs/smoke-stock-full-vanilla.log
+	grep -q 'gma-present .*mode=6' build/logs/smoke-stock-full-vanilla.log
+	grep -q 'uart: \[FS\]successed!' build/logs/smoke-stock-full-vanilla.log
 
 smoke-stock-full-fat16: build $(STOCK_SD_IMAGE_FAT16)
 	mkdir -p build/logs
