@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2880 @@
+@@ -0,0 +1,2891 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -102,6 +102,9 @@
 +#define SF2000_TVSYS_RGB_LCD      0x16U
 +#define SF2000_MMIO_BASE       0x10000000ULL
 +#define SF2000_MMIO_SIZE       0x0fc00000ULL
++#define SF2000_MSYSIO_BASE     0x18800000ULL
++#define SF2000_AVPHY_BASE      0x18804000ULL
++#define SF2000_AVPHY_SIZE      0x00000100ULL
 +#define SF2000_LCD_MMIO_BASE   0x18000000ULL
 +#define SF2000_LCD_MMIO_SIZE   0x00001000ULL
 +#define SF2000_LCD_WIDTH       320
@@ -132,6 +135,8 @@
 +#define SF2000_GE_HQ_LAST      (SF2000_GE_BASE + 0x14)
 +#define SF2000_GE_QUEUE_DUMP_WORDS 64
 +#define SF2000_GE_QUEUE_DUMP_DEFAULT 96
++#define SF2000_GMA_BASE        0x18808000ULL
++#define SF2000_GMA_SIZE        0x00003000ULL
 +#define SF2000_TIMER_BASE      0x18818a00ULL
 +#define SF2000_TIMER_SIZE      0x00000080ULL
 +#define SF2000_IRQ_STATUS1     0x18800030ULL
@@ -902,6 +907,12 @@
 +    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
 +        (addr == SF2000_UART1_BASE + SF2000_UART_LSR &&
 +         g_str_equal(kind, "mmio-read")) ||
++        (addr == SF2000_MSYSIO_BASE && g_str_equal(kind, "mmio-read")) ||
++        (addr >= SF2000_AVPHY_BASE &&
++         addr < SF2000_AVPHY_BASE + SF2000_AVPHY_SIZE) ||
++        (addr >= SF2000_GE_BASE && addr < SF2000_GE_BASE + SF2000_GE_SIZE) ||
++        (addr >= SF2000_GMA_BASE &&
++         addr < SF2000_GMA_BASE + SF2000_GMA_SIZE) ||
 +        (addr >= 0x1884c000 && addr < 0x1884c040) ||
 +        (addr >= 0x1882e098 && addr < 0x1882e0a4) ||
 +        addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||

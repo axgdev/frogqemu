@@ -23,13 +23,13 @@ small because the SF2000 code is isolated in `hw/mips/sf2000.c`.
 On Alpine:
 
 ```sh
-apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib
+apk add --no-cache curl meson samurai patch pkgconf glib-dev pixman-dev py3-pip py3-distlib
 ```
 
 Optional tools for generated vanilla SD-card images and captures:
 
 ```sh
-apk add --no-cache dosfstools mtools unzip imagemagick ffmpeg
+apk add --no-cache ccache dosfstools mtools unzip imagemagick ffmpeg
 ```
 
 On Debian or Ubuntu x86_64 hosts, the equivalent starting point is:
@@ -60,6 +60,20 @@ configures only `mipsel-softmmu`, and builds `qemu-system-mipsel`.
 Use `make build-info` to print the host architecture, firmware paths, and
 QEMU binary path that will be used. Use `QEMU_JOBS=<n>` to cap parallelism on
 small machines, for example `make build QEMU_JOBS=4`.
+
+The project intentionally keeps `make` as the user-facing build contract, but
+QEMU's upstream build graph is Meson plus Ninja. Replacing that with handwritten
+Makefiles would mean maintaining a second QEMU build system. On Alpine the
+lightweight `samurai` package provides the `ninja` command and is enough for
+this repository. The Makefile auto-selects `ninja` or `samu`; override with
+`NINJA=/path/to/ninja` if needed. If `ccache` is installed, QEMU is configured
+through it automatically. Use `QEMU_CCACHE=0` to disable that, and
+`make ccache-stats` to inspect cache use.
+
+Device-tree data is useful for documenting discovered hardware facts such as
+RAM size, CPU clock, and peripheral base addresses. The stock SF2000 boot path
+does not currently consume a DTB, so DTB support should stay a research and
+open-firmware aid unless a boot path explicitly needs it.
 
 The machine model is target-MIPS, not host-architecture-specific. Building on
 an x86_64 Linux host produces a native x86_64 `qemu-system-mipsel` binary at

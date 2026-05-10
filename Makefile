@@ -6,6 +6,17 @@ QEMU_URL := https://download.qemu.org/$(QEMU_TARBALL)
 QEMU_SRC := .cache/qemu-$(QEMU_VERSION)
 QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
 QEMU_JOBS ?=
+NINJA ?= $(shell command -v ninja 2>/dev/null || command -v samu 2>/dev/null || printf ninja)
+QEMU_CCACHE ?= auto
+CCACHE_BIN := $(shell command -v ccache 2>/dev/null || true)
+ifeq ($(QEMU_CCACHE),auto)
+QEMU_USE_CCACHE := $(if $(CCACHE_BIN),1,)
+else ifneq ($(filter 1 yes true on,$(QEMU_CCACHE)),)
+QEMU_USE_CCACHE := 1
+else
+QEMU_USE_CCACHE :=
+endif
+QEMU_CONFIGURE_ENV := $(if $(QEMU_USE_CCACHE),CC="$(if $(CCACHE_BIN),$(CCACHE_BIN),ccache) cc")
 MKSD := build/mksf2000sd
 STOCK_SD_IMAGE := build/sf2000-stock.sd.img
 STOCK_SD_IMAGE_FAT16 := build/sf2000-stock-fat16.sd.img
@@ -31,7 +42,7 @@ VIDEO_GMA_DUMP_LIMIT ?= 300
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps build-info fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps build-info ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -40,6 +51,7 @@ help:
 		'Targets:' \
 		'  make deps          show required Alpine packages' \
 		'  make build-info    show host/build configuration' \
+		'  make ccache-stats  show ccache statistics when ccache is installed' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
 		'  make smoke-input   verify HMP/VNC keyboard events reach the keypad' \
@@ -65,7 +77,8 @@ help:
 
 deps:
 	@printf '%s\n' \
-		'apk add --no-cache curl meson ninja patch pkgconf glib-dev pixman-dev py3-pip py3-distlib' \
+		'apk add --no-cache curl meson samurai patch pkgconf glib-dev pixman-dev py3-pip py3-distlib' \
+		'optional for faster rebuilds: apk add --no-cache ccache' \
 		'optional for vanilla-sd: apk add --no-cache dosfstools mtools unzip' \
 		'optional for captures/video: apk add --no-cache imagemagick ffmpeg'
 
@@ -73,10 +86,20 @@ build-info:
 	@printf 'host: %s\n' "$$(uname -m)"
 	@printf 'qemu: %s\n' '$(QEMU_VERSION)'
 	@printf 'binary: %s\n' '$(QEMU_BIN)'
+	@printf 'ninja: %s\n' '$(NINJA)'
 	@printf 'jobs: %s\n' '$(if $(QEMU_JOBS),$(QEMU_JOBS),ninja default)'
+	@printf 'ccache: %s\n' '$(if $(QEMU_USE_CCACHE),$(if $(CCACHE_BIN),$(CCACHE_BIN),ccache),disabled)'
 	@printf 'firmware: %s\n' '$(FIRMWARE)'
 	@printf 'bugfix firmware: %s\n' '$(FIRMWARE_BUGFIX)'
 	@printf 'asd: %s\n' '$(ASD)'
+
+ccache-stats:
+	@command -v ccache >/dev/null || { printf '%s\n' 'ccache is not installed'; exit 0; }
+	ccache --show-stats
+
+ccache-zero:
+	@command -v ccache >/dev/null || { printf '%s\n' 'ccache is not installed'; exit 0; }
+	ccache --zero-stats
 
 fetch: $(QEMU_SRC)/.fetched
 
@@ -97,8 +120,9 @@ $(QEMU_SRC)/.patched: $(QEMU_SRC)/.fetched patches/qemu-$(QEMU_VERSION)/0001-hw-
 configure: $(QEMU_SRC)/build/build.ninja
 
 $(QEMU_SRC)/build/build.ninja: | $(QEMU_SRC)/.patched
-	cd $(QEMU_SRC) && ./configure \
+	cd $(QEMU_SRC) && $(QEMU_CONFIGURE_ENV) ./configure \
 		--target-list=mipsel-softmmu \
+		--ninja=$(NINJA) \
 		--disable-docs \
 		--disable-gtk \
 		--disable-sdl \
@@ -112,7 +136,7 @@ $(QEMU_SRC)/build/build.ninja: | $(QEMU_SRC)/.patched
 build: $(QEMU_BIN)
 
 $(QEMU_BIN): $(QEMU_SRC)/build/build.ninja
-	ninja $(if $(QEMU_JOBS),-j$(QEMU_JOBS),) -C $(QEMU_SRC)/build qemu-system-mipsel
+	$(NINJA) $(if $(QEMU_JOBS),-j$(QEMU_JOBS),) -C $(QEMU_SRC)/build qemu-system-mipsel
 
 $(MKSD): tools/mksf2000sd.c
 	mkdir -p $(dir $@)
