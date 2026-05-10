@@ -84,6 +84,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_LCD_HEIGHT      240
 #define SF2000_CHIP_ID_VALUE   0x1512a501
 #define SF2000_HC15XX_CHIP_ID  0x1512
+#define SF2000_IRC_BASE        0x18818100ULL
+#define SF2000_IRC_SIZE        0x00000010ULL
+#define SF2000_IRC_CFG         0x00
+#define SF2000_IRC_FIFOCFG     0x01
+#define SF2000_IRC_IER         0x06
+#define SF2000_IRC_ISR         0x07
+#define SF2000_IRC_FIFO        0x08
+#define SF2000_IRC_FIFOCFG_RESET BIT(7)
+#define SF2000_IRC_ISR_MASK    0x03
 #define SF2000_UART0_BASE      0x18818300ULL
 #define SF2000_UART1_BASE      0x18818600ULL
 #define SF2000_UART_SIZE       0x00000008ULL
@@ -166,6 +175,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_I2C0_IRQ        (1u << SF2000_I2C0_IRQ_BIT)
 #define SF2000_I2C1_IRQ_BIT    25
 #define SF2000_I2C1_IRQ        (1u << SF2000_I2C1_IRQ_BIT)
+#define SF2000_IRC_IRQ_BIT     19
+#define SF2000_IRC_IRQ         (1u << SF2000_IRC_IRQ_BIT)
 #define SF2000_SDIO_IRQ_BIT    10
 #define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
 #define SF2000_AUX_BASE        0x1880f000ULL
@@ -345,6 +356,9 @@ static uint8_t sf2000_i2c_isr1[2];
 static uint8_t sf2000_i2c_data[2];
 static uint32_t sf2000_pwm_clk_ctrl;
 static SF2000PWMChannel sf2000_pwm_channel[SF2000_PWM_CHANNELS];
+static uint8_t sf2000_irc_fifo_cfg;
+static uint8_t sf2000_irc_ier;
+static uint8_t sf2000_irc_isr;
 static uint32_t sf2000_key_mask;
 static unsigned sf2000_key_shift_index;
 static uint32_t sf2000_gpio_l_out;
@@ -859,6 +873,84 @@ static void sf2000_pwm_write(hwaddr full_addr)
     sf2000_pwm_refresh_channel(channel);
 }
 
+static bool sf2000_irc_decode(hwaddr full_addr, unsigned *offset)
+{
+    if (full_addr < SF2000_IRC_BASE ||
+        full_addr >= SF2000_IRC_BASE + SF2000_IRC_SIZE) {
+        return false;
+    }
+
+    *offset = full_addr - SF2000_IRC_BASE;
+    return true;
+}
+
+static bool sf2000_irc_irq_pending(void)
+{
+    return (sf2000_irc_isr & sf2000_irc_ier & SF2000_IRC_ISR_MASK) != 0;
+}
+
+static uint64_t sf2000_irc_read(hwaddr full_addr)
+{
+    unsigned offset;
+    uint32_t value = 0;
+
+    if (!sf2000_irc_decode(full_addr, &offset)) {
+        return 0;
+    }
+
+    switch (offset) {
+    case SF2000_IRC_FIFOCFG:
+        /*
+         * Bits 6:0 report FIFO occupancy to the SDK driver. With no emulated
+         * IR pulses queued, preserve the configured threshold in storage but
+         * expose an empty FIFO count.
+         */
+        value = 0;
+        break;
+    case SF2000_IRC_IER:
+        value = sf2000_irc_ier;
+        break;
+    case SF2000_IRC_ISR:
+        value = sf2000_irc_isr;
+        break;
+    case SF2000_IRC_FIFO:
+        value = 0;
+        break;
+    default:
+        sf2000_mmio_get32(full_addr, &value);
+        value >>= ((full_addr & 3u) * 8u);
+        break;
+    }
+
+    return value & 0xffu;
+}
+
+static void sf2000_irc_write(hwaddr full_addr, uint64_t value)
+{
+    unsigned offset;
+
+    if (!sf2000_irc_decode(full_addr, &offset)) {
+        return;
+    }
+
+    switch (offset) {
+    case SF2000_IRC_FIFOCFG:
+        sf2000_irc_fifo_cfg = value & ~SF2000_IRC_FIFOCFG_RESET;
+        if (value & SF2000_IRC_FIFOCFG_RESET) {
+            sf2000_irc_isr &= ~SF2000_IRC_ISR_MASK;
+        }
+        break;
+    case SF2000_IRC_IER:
+        sf2000_irc_ier = value & SF2000_IRC_ISR_MASK;
+        break;
+    case SF2000_IRC_ISR:
+        sf2000_irc_isr &= ~(value & SF2000_IRC_ISR_MASK);
+        break;
+    default:
+        break;
+    }
+}
+
 static bool sf2000_gpio_l_vsync_enabled(void)
 {
     uint32_t ier = 0;
@@ -1023,6 +1115,8 @@ static void sf2000_update_irq(void)
                   sf2000_irq1_enabled(SF2000_I2C0_IRQ)) ||
                  (sf2000_i2c_irq_pending(1) &&
                   sf2000_irq1_enabled(SF2000_I2C1_IRQ)) ||
+                 (sf2000_irc_irq_pending() &&
+                  sf2000_irq1_enabled(SF2000_IRC_IRQ)) ||
                  (sf2000_sb_timer_pending() && !sf2000_sb_timer_irq_masked) ||
                  (sf2000_sdio_irq_pending &&
                   sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
@@ -1114,6 +1208,8 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
      */
     if ((addr >= SF2000_UART0_BASE &&
          addr < SF2000_UART0_BASE + SF2000_UART_SIZE) ||
+        (addr >= SF2000_IRC_BASE &&
+         addr < SF2000_IRC_BASE + SF2000_IRC_SIZE) ||
         (addr >= SF2000_UART1_BASE &&
          addr < SF2000_UART1_BASE + SF2000_UART_SIZE) ||
         (addr >= SF2000_I2C0_BASE &&
@@ -2213,6 +2309,7 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     unsigned i2c_index;
     unsigned pwm_channel;
     unsigned pwm_offset;
+    unsigned irc_offset;
     unsigned i;
 
     if (full_addr == SF2000_IRQ_STATUS1) {
@@ -2233,6 +2330,9 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
             if (sf2000_i2c_irq_pending(i2c_index)) {
                 value |= sf2000_i2c_irq_mask(i2c_index);
             }
+        }
+        if (sf2000_irc_irq_pending()) {
+            value |= SF2000_IRC_IRQ;
         }
         if (sf2000_sdio_irq_pending) {
             value |= SF2000_SDIO_IRQ;
@@ -2315,6 +2415,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         if (size < 4) {
             value &= (1u << (size * 8)) - 1u;
         }
+    } else if (sf2000_irc_decode(full_addr, &irc_offset)) {
+        value = sf2000_irc_read(full_addr);
     } else if (full_addr >= SF2000_ADC_BASE &&
                full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
         value = sf2000_adc_read(full_addr, size);
@@ -2440,6 +2542,7 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     unsigned i2c_offset;
     unsigned pwm_channel;
     unsigned pwm_offset;
+    unsigned irc_offset;
     unsigned i;
 
     for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -2558,6 +2661,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         sf2000_i2c_write(full_addr, value);
     } else if (sf2000_pwm_decode(full_addr, &pwm_channel, &pwm_offset)) {
         sf2000_pwm_write(full_addr);
+    } else if (sf2000_irc_decode(full_addr, &irc_offset)) {
+        sf2000_irc_write(full_addr, value);
     } else if (full_addr == 0x1882e098) {
         sf2000_sflash_cmd = value & 0xff;
         if (sf2000_trace_sflash()) {
