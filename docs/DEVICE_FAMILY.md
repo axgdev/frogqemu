@@ -102,12 +102,13 @@ Current evidence suggests:
 - The HCRTOS DTS files for HC15xx boards, including UniFrog's `sf2000_min.dts`,
   describe two USB controller blocks at physical `0x18844000` and `0x18850000`
   with host mode capability, but the SF2000 minimal DTS keeps them disabled.
-  The SF2000 DB-B210-V1.1 schematic removes one board-level unknown: the USB-A
-  connector is wired to USB1 D-/D+ and P5V, while the micro USB connector is
-  wired to USB0 D-/D+ and VBUS. Runtime probes still show both HCRTOS root hubs
-  as powered but disconnected when flash drives and a mouse are attached to the
-  USB-A port, so the remaining unknowns are the USB1 host-power/data path and
-  any board-specific host-enable step.
+  The SF2000 DB-B210-V1.1 reference schematic says the USB-A connector is wired
+  to USB1 D-/D+ and P5V, while the micro USB connector is wired to USB0 D-/D+
+  and VBUS. Treat that as a lead, not a guarantee for every retail PCB. Runtime
+  probes on the tested unit still show both HCRTOS root hubs as powered but
+  disconnected when flash drives and a mouse are attached to the USB-A port, so
+  the remaining unknowns are board routing, the host-power/data path, and any
+  board-specific host-enable step.
 - HCRTOS USB HID documentation says the stack supports host and gadget HID
   modes. Host HID is documented for keyboard and mouse, with input nodes such
   as `/dev/input/kbd0` and `/dev/input/mouse0`. Gadget HID can expose the
