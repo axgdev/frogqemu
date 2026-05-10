@@ -87,11 +87,18 @@ make build
 make smoke
 ```
 
-`make build` downloads QEMU 10.2.2 into `.cache/`, applies the local patch,
+`make build` downloads QEMU 10.2.2 into `.cache/`, applies the local wiring
+patch, copies the maintained SF2000 model from `qemu/hw/mips/sf2000.c`,
 configures only `mipsel-softmmu`, and builds `qemu-system-mipsel`.
 Use `make build-info` to print the host architecture, firmware paths, and
 QEMU binary path that will be used. Use `QEMU_JOBS=<n>` to cap parallelism on
 small machines, for example `make build QEMU_JOBS=4`.
+
+The SF2000 machine source is kept as a normal repository file rather than
+embedded in a large generated patch. The patch under `patches/` only teaches
+upstream QEMU's MIPS build files about the additional `sf2000.c` machine. This
+keeps local review and refactoring practical while still making the upstream
+delta explicit.
 
 The project intentionally keeps `make` as the user-facing build contract, but
 QEMU's upstream build graph is Meson plus Ninja. Replacing that with handwritten

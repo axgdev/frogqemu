@@ -5,6 +5,7 @@ QEMU_TARBALL := qemu-$(QEMU_VERSION).tar.xz
 QEMU_URL := https://download.qemu.org/$(QEMU_TARBALL)
 QEMU_SRC := .cache/qemu-$(QEMU_VERSION)
 QEMU_BIN := $(QEMU_SRC)/build/qemu-system-mipsel
+SF2000_QEMU_SRC := qemu/hw/mips/sf2000.c
 QEMU_JOBS ?=
 NINJA ?= $(shell command -v ninja 2>/dev/null || command -v samu 2>/dev/null || printf ninja)
 QEMU_CCACHE ?= auto
@@ -141,8 +142,9 @@ $(QEMU_SRC)/.fetched:
 
 patch: $(QEMU_SRC)/.patched
 
-$(QEMU_SRC)/.patched: $(QEMU_SRC)/.fetched patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch
+$(QEMU_SRC)/.patched: $(QEMU_SRC)/.fetched patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch $(SF2000_QEMU_SRC)
 	cd $(QEMU_SRC) && { test -f hw/mips/sf2000.c || patch -p1 < ../../patches/qemu-$(QEMU_VERSION)/0001-hw-mips-add-sf2000-machine.patch; }
+	cp $(SF2000_QEMU_SRC) $(QEMU_SRC)/hw/mips/sf2000.c
 	touch $@
 
 configure: $(QEMU_SRC)/build/build.ninja
@@ -163,7 +165,7 @@ $(QEMU_SRC)/build/build.ninja: | $(QEMU_SRC)/.patched
 
 build: $(QEMU_BIN)
 
-$(QEMU_BIN): $(QEMU_SRC)/build/build.ninja
+$(QEMU_BIN): $(QEMU_SRC)/build/build.ninja $(QEMU_SRC)/.patched
 	$(NINJA) $(if $(QEMU_JOBS),-j$(QEMU_JOBS),) -C $(QEMU_SRC)/build qemu-system-mipsel
 
 $(MKSD): tools/mksf2000sd.c
