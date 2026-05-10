@@ -187,6 +187,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_GPIO_L_RIS_IER  0x18800048ULL
 #define SF2000_GPIO_L_IN       0x18800050ULL
 #define SF2000_GPIO_L_OUT      0x18800054ULL
+#define SF2000_GPIO_L_DIR      0x18800058ULL
 #define SF2000_GPIO_L_ISR      0x1880005cULL
 #define SF2000_GPIO_L08        BIT(8)
 #define SF2000_GPIO_R_IN       0x188000f0ULL
@@ -195,6 +196,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_KEY_DATA_BIT    23
 #define SF2000_KEY_CLK_BIT     24
 #define SF2000_KEY_COUNT       12
+#define SF2000_RF_DATA_BIT     27
+#define SF2000_RF_CLK_BIT      28
+#define SF2000_RF_CS_BIT       29
 
 typedef struct SF2000RegDefault {
     hwaddr addr;
@@ -362,6 +366,16 @@ static uint8_t sf2000_irc_isr;
 static uint32_t sf2000_key_mask;
 static unsigned sf2000_key_shift_index;
 static uint32_t sf2000_gpio_l_out;
+static uint8_t sf2000_rf_regs[256];
+static bool sf2000_rf_cs;
+static bool sf2000_rf_clk;
+static bool sf2000_rf_have_reg;
+static bool sf2000_rf_read_phase;
+static uint8_t sf2000_rf_reg;
+static uint8_t sf2000_rf_shift;
+static uint8_t sf2000_rf_bit_count;
+static uint8_t sf2000_rf_response;
+static uint8_t sf2000_rf_response_bit;
 static unsigned sf2000_gma_dump_count;
 static unsigned sf2000_ge_queue_dump_count;
 static uint32_t sf2000_active_gma[2];
@@ -1708,6 +1722,124 @@ static uint32_t sf2000_gpio_l_sample(uint32_t value)
     return value;
 }
 
+static uint8_t sf2000_rf_read_reg(uint8_t reg)
+{
+    switch (reg) {
+    case 0x05:
+        /*
+         * UniFrog's empirical stock-compatible sequence writes 0x25=0xa5
+         * and then validates the bus by reading RF register 0x05 as 0xa5.
+         * Keep the ID/test register stable even if guest code never touched
+         * it directly.
+         */
+        return sf2000_rf_regs[reg] ? sf2000_rf_regs[reg] : 0xa5;
+    case 0x07:
+        /*
+         * Packet-ready/status. Zero means no wireless packet is pending. The
+         * frontend can still use the local keypad path while the RF receiver
+         * is idle, and later packet injection can hang off this register.
+         */
+        return 0x00;
+    case 0x61:
+        return 0x00;
+    default:
+        return sf2000_rf_regs[reg];
+    }
+}
+
+static void sf2000_rf_reset_transaction(void)
+{
+    sf2000_rf_have_reg = false;
+    sf2000_rf_read_phase = false;
+    sf2000_rf_shift = 0;
+    sf2000_rf_bit_count = 0;
+    sf2000_rf_response = 0;
+    sf2000_rf_response_bit = 0;
+}
+
+static void sf2000_rf_finish_byte(uint8_t value)
+{
+    if (!sf2000_rf_have_reg) {
+        sf2000_rf_reg = value;
+        sf2000_rf_have_reg = true;
+        sf2000_rf_response = sf2000_rf_read_reg(sf2000_rf_reg);
+        sf2000_rf_response_bit = 0;
+        return;
+    }
+
+    if (!sf2000_rf_read_phase) {
+        sf2000_rf_regs[sf2000_rf_reg] = value;
+        if (sf2000_rf_reg == 0x25 && value == 0xa5) {
+            sf2000_rf_regs[0x05] = 0xa5;
+        }
+    }
+}
+
+static bool sf2000_rf_data_is_output(void)
+{
+    uint32_t dir = 0;
+
+    sf2000_mmio_get32(SF2000_GPIO_L_DIR, &dir);
+    return (dir & BIT(SF2000_RF_DATA_BIT)) != 0;
+}
+
+static void sf2000_rf_gpio_l_write(uint32_t value)
+{
+    bool new_cs = (value & BIT(SF2000_RF_CS_BIT)) != 0;
+    bool new_clk = (value & BIT(SF2000_RF_CLK_BIT)) != 0;
+    bool data_is_output;
+
+    if ((!sf2000_rf_cs && new_cs) || (sf2000_rf_cs && !new_cs)) {
+        sf2000_rf_reset_transaction();
+    }
+
+    sf2000_rf_cs = new_cs;
+    if (sf2000_rf_cs) {
+        sf2000_rf_clk = new_clk;
+        return;
+    }
+
+    data_is_output = sf2000_rf_data_is_output();
+    if (!data_is_output && sf2000_rf_have_reg) {
+        sf2000_rf_read_phase = true;
+    }
+
+    if (!sf2000_rf_clk && new_clk) {
+        if (data_is_output) {
+            sf2000_rf_shift = (sf2000_rf_shift << 1) |
+                              ((value >> SF2000_RF_DATA_BIT) & 1u);
+            if (++sf2000_rf_bit_count == 8) {
+                sf2000_rf_finish_byte(sf2000_rf_shift);
+                sf2000_rf_shift = 0;
+                sf2000_rf_bit_count = 0;
+            }
+        }
+    }
+
+    sf2000_rf_clk = new_clk;
+}
+
+static uint32_t sf2000_rf_gpio_l_sample(uint32_t value)
+{
+    if (!sf2000_rf_cs && sf2000_rf_have_reg && !sf2000_rf_data_is_output()) {
+        uint8_t bit = (sf2000_rf_response >> (7 - sf2000_rf_response_bit)) & 1;
+
+        if (bit) {
+            value |= BIT(SF2000_RF_DATA_BIT);
+        } else {
+            value &= ~BIT(SF2000_RF_DATA_BIT);
+        }
+        sf2000_rf_response_bit++;
+        if (sf2000_rf_response_bit == 8) {
+            sf2000_rf_reg++;
+            sf2000_rf_response = sf2000_rf_read_reg(sf2000_rf_reg);
+            sf2000_rf_response_bit = 0;
+        }
+    }
+
+    return value;
+}
+
 static void sf2000_gpio_l_write(uint32_t value)
 {
     bool old_clk = (sf2000_gpio_l_out & BIT(SF2000_KEY_CLK_BIT)) != 0;
@@ -1740,6 +1872,7 @@ static void sf2000_gpio_l_write(uint32_t value)
     }
 
     sf2000_gpio_l_out = value;
+    sf2000_rf_gpio_l_write(value);
 }
 
 static void sf2000_keyboard_event(DeviceState *dev, QemuConsole *src,
@@ -2381,6 +2514,7 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
             }
         }
         value = sf2000_gpio_l_sample(value);
+        value = sf2000_rf_gpio_l_sample(value);
         value >>= ((full_addr & 3u) * 8u);
         if (size < 4) {
             value &= (1u << (size * 8)) - 1u;
