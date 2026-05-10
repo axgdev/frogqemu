@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2549 @@
+@@ -0,0 +1,2632 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -294,6 +294,8 @@
 +static unsigned sf2000_pc_sample_count;
 +static uint32_t sf2000_last_call_pc;
 +static bool sf2000_stock_security_patched;
++static bool sf2000_stock_archive_path_patched;
++static bool sf2000_stock_archive_access_patched;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
@@ -539,6 +541,85 @@
 +    }
 +}
 +
++static void sf2000_patch_stock_archive_path(void)
++{
++    static const char original[] = "%s/Resources/Archive.sys";
++    static const char replacement[] = "%s/RESOUR~1/ARCHIVE.SYS";
++    uint8_t current[sizeof(original)];
++    CPUState *cs = first_cpu;
++    MIPSCPU *cpu;
++
++    if (sf2000_stock_archive_path_patched ||
++        !g_getenv("SF2000_PATCH_STOCK_ARCHIVE_SHORTNAME")) {
++        return;
++    }
++    if (!cs) {
++        return;
++    }
++    cpu = MIPS_CPU(cs);
++    if ((uint32_t)cpu->env.active_tc.PC >= 0x81000000U) {
++        return;
++    }
++
++    /*
++     * The stock launcher formats "%s/Resources/Archive.sys" from this
++     * constant before polling fs_access(). Patching it to the FAT short-name
++     * spelling is a diagnostic for VFAT/LFN lookup behavior in generated SD
++     * images; it is not part of the normal machine model.
++     */
++    cpu_physical_memory_read(0x0099b11c, current, sizeof(current));
++    if (memcmp(current, original, sizeof(original)) == 0) {
++        uint8_t patched[sizeof(original)];
++
++        memset(patched, 0, sizeof(patched));
++        memcpy(patched, replacement, sizeof(replacement));
++        cpu_physical_memory_write(0x0099b11c, patched, sizeof(patched));
++        queue_tb_flush(cs);
++        sf2000_stock_archive_path_patched = true;
++        warn_report("sf2000: patched stock Archive.sys path to FAT short names for diagnostic boot");
++    }
++}
++
++static void sf2000_patch_stock_archive_access_wait(void)
++{
++    static const uint8_t branch[] = {
++        0xfa, 0xff, 0x40, 0x14, /* bnez v0,0x803463b8 */
++        0x32, 0x00, 0x04, 0x24, /* li a0,50 (delay slot) */
++    };
++    static const uint8_t patch[] = {
++        0x00, 0x00, 0x00, 0x00, /* nop */
++        0x32, 0x00, 0x04, 0x24, /* preserve delay slot */
++    };
++    uint8_t current[sizeof(branch)];
++    CPUState *cs = first_cpu;
++    MIPSCPU *cpu;
++
++    if (sf2000_stock_archive_access_patched ||
++        !g_getenv("SF2000_PATCH_STOCK_ARCHIVE_ACCESS_WAIT")) {
++        return;
++    }
++    if (!cs) {
++        return;
++    }
++    cpu = MIPS_CPU(cs);
++    if ((uint32_t)cpu->env.active_tc.PC >= 0x81000000U) {
++        return;
++    }
++
++    /*
++     * Diagnostic only: skip the stock launcher's pre-menu wait for
++     * fs_access("/mnt/sda1/Resources/Archive.sys") to succeed. This exposes
++     * later boot dependencies while the exact FAT/VFS mismatch is isolated.
++     */
++    cpu_physical_memory_read(0x003463cc, current, sizeof(current));
++    if (memcmp(current, branch, sizeof(branch)) == 0) {
++        cpu_physical_memory_write(0x003463cc, patch, sizeof(patch));
++        queue_tb_flush(cs);
++        sf2000_stock_archive_access_patched = true;
++        warn_report("sf2000: patched stock Archive.sys access wait for diagnostic boot");
++    }
++}
++
 +static bool sf2000_timer_is_sec_ms(unsigned index)
 +{
 +    return index < SF2000_TIMER_SEC_COUNT;
@@ -762,8 +843,10 @@
 +     * activity. Re-evaluate the level periodically so QEMU can assert EIRQ3
 +     * after virtual time advances instead of only during register accesses.
 +     */
-+    sf2000_patch_stock_security_check();
 +    sf2000_trace_pc_landmark();
++    sf2000_patch_stock_security_check();
++    sf2000_patch_stock_archive_path();
++    sf2000_patch_stock_archive_access_wait();
 +    sf2000_update_irq();
 +    timer_mod(sf2000_irq_poll_timer,
 +              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
