@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2632 @@
+@@ -0,0 +1,2711 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -290,6 +290,7 @@
 +static uint32_t sf2000_gpio_l_out;
 +static unsigned sf2000_gma_dump_count;
 +static unsigned sf2000_ge_queue_dump_count;
++static uint32_t sf2000_active_gma[2];
 +static const char *sf2000_last_pc_landmark;
 +static unsigned sf2000_pc_sample_count;
 +static uint32_t sf2000_last_call_pc;
@@ -942,6 +943,18 @@
 +    return limit;
 +}
 +
++static unsigned sf2000_ge_node_dump_limit(void)
++{
++    const char *limit_s = g_getenv("SF2000_GE_NODE_DUMP_LIMIT");
++    unsigned limit;
++
++    if (!limit_s || !limit_s[0]) {
++        return 12;
++    }
++    limit = g_ascii_strtoull(limit_s, NULL, 0);
++    return limit;
++}
++
 +static bool sf2000_ge_read_node(uint32_t first, uint32_t *node,
 +                                uint32_t words)
 +{
@@ -1063,6 +1076,7 @@
 +    uint32_t words;
 +    uint32_t node[SF2000_GE_QUEUE_DUMP_WORDS];
 +    unsigned dump_limit;
++    unsigned node_dump_limit;
 +    unsigned i;
 +
 +    /*
@@ -1088,6 +1102,7 @@
 +    }
 +
 +    dump_limit = sf2000_ge_dump_limit();
++    node_dump_limit = sf2000_ge_node_dump_limit();
 +    if (sf2000_ge_queue_dump_count < dump_limit) {
 +        qemu_log_mask(LOG_UNIMP,
 +                      "sf2000: ge-start[%u] first=0x%08x last=0x%08x words=%u dst=0x%08x src=0x%08x fmt=0x%x wh=0x%08x aux=0x%08x\n",
@@ -1095,7 +1110,7 @@
 +                      words > 2 ? node[2] : 0, words > 6 ? node[6] : 0,
 +                      words > 13 ? node[13] : 0, words > 17 ? node[17] : 0,
 +                      words > 25 ? node[25] : 0);
-+        if (sf2000_ge_queue_dump_count < 12) {
++        if (sf2000_ge_queue_dump_count < node_dump_limit) {
 +            for (i = 0; i < words; i++) {
 +                qemu_log_mask(LOG_UNIMP, "sf2000: ge-node[%02u]=0x%08x\n",
 +                              i, node[i]);
@@ -1110,6 +1125,20 @@
 +
 +    sf2000_mmio_set32(SF2000_GE_STATUS, 0);
 +    sf2000_mmio_set32(SF2000_GE_HQ_FIRST, last);
++
++    /*
++     * The GMA layer scans descriptor chains continuously on hardware. Stock
++     * firmware often arms the descriptors first, then uses GE to populate their
++     * backing buffers. Re-present active descriptors after GE completion so the
++     * emulated console observes those late buffer updates without waiting for a
++     * new doorbell write that may never come.
++     */
++    if (sf2000_active_gma[0]) {
++        sf2000_gma_present(sf2000_active_gma[0]);
++    }
++    if (sf2000_active_gma[1] && sf2000_active_gma[1] != sf2000_active_gma[0]) {
++        sf2000_gma_present(sf2000_active_gma[1]);
++    }
 +}
 +
 +static bool sf2000_adc_decode(hwaddr full_addr, unsigned *index,
@@ -1978,6 +2007,7 @@
 +            sf2000_ge_complete_queue();
 +        }
 +    } else if ((full_addr & ~0x80u) == 0x18808304) {
++        sf2000_active_gma[(full_addr & 0x80u) ? 1 : 0] = value;
 +        sf2000_gma_present(value);
 +    } else if (full_addr == SF2000_UART1_BASE) {
 +        sf2000_uart_put(value & 0xff);
@@ -2098,21 +2128,21 @@
 +    return 0xff000000u | (pix & 0x00ffffffu);
 +}
 +
-+static void sf2000_gma_present(uint32_t dmba_addr)
++static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
++                                         bool dump_frame)
 +{
-+    SF2000LCDState *s = sf2000_lcd;
 +    DisplaySurface *surface;
 +    uint8_t header[40];
 +    uint8_t *linebuf;
 +    uint8_t palette[1024];
 +    bool have_palette = false;
-+    uint32_t d0, d1, d2, d3, d4, d5, d7;
++    uint32_t d0, d1, d2, d3, d4, d5, d6, d7, d8, d9;
 +    uint32_t mode, clut_update, sx, ex, sy, ey, src_w, src_h, pitch;
 +    uint32_t width, height, bpp;
 +    int y;
 +
 +    if (!s || !dmba_addr) {
-+        return;
++        return 0;
 +    }
 +    if (address_space_read(&address_space_memory, dmba_addr,
 +                           MEMTXATTRS_UNSPECIFIED, header,
@@ -2120,7 +2150,7 @@
 +        qemu_log_mask(LOG_UNIMP,
 +                      "sf2000: gma-present header-read-failed dmba=0x%08x\n",
 +                      dmba_addr);
-+        return;
++        return 0;
 +    }
 +
 +    d0 = ldl_le_p(header + 0);
@@ -2129,7 +2159,10 @@
 +    d3 = ldl_le_p(header + 12);
 +    d4 = ldl_le_p(header + 16);
 +    d5 = ldl_le_p(header + 20);
++    d6 = ldl_le_p(header + 24);
 +    d7 = ldl_le_p(header + 28);
++    d8 = ldl_le_p(header + 32);
++    d9 = ldl_le_p(header + 36);
 +
 +    /*
 +     * GMA/GE display updates are driven by a descriptor memory base address
@@ -2150,7 +2183,7 @@
 +
 +    if (ex < sx || ey < sy || sx >= SF2000_LCD_WIDTH ||
 +        sy >= SF2000_LCD_HEIGHT || !d7) {
-+        return;
++        return d6;
 +    }
 +
 +    width = MIN(ex - sx + 1, (uint32_t)SF2000_LCD_WIDTH - sx);
@@ -2182,14 +2215,21 @@
 +        qemu_log_mask(LOG_UNIMP,
 +                      "sf2000: gma-present unsupported mode=%u dmba=0x%08x bitmap=0x%08x\n",
 +                      mode, dmba_addr, d7);
-+        return;
++        return d6;
 +    }
 +
 +    if (!pitch) {
 +        pitch = width * bpp;
 +    }
 +    if (pitch < width * bpp) {
-+        return;
++        return d6;
++    }
++
++    if (mode == 0x06 && (d0 & 1)) {
++        qemu_log_mask(LOG_UNIMP,
++                      "sf2000: gma-skip-hidden dmba=0x%08x bitmap=0x%08x d0=%08x d6=%08x\n",
++                      dmba_addr, d7, d0, d6);
++        return d6;
 +    }
 +
 +    surface = qemu_console_surface(s->con);
@@ -2200,7 +2240,7 @@
 +        surface = qemu_console_surface(s->con);
 +    }
 +    if (surface_bits_per_pixel(surface) != 32) {
-+        return;
++        return d6;
 +    }
 +
 +    linebuf = g_malloc(pitch);
@@ -2237,11 +2277,50 @@
 +     * frames exactly after a descriptor is presented, giving us deterministic
 +     * artifacts to compare against real-device photos or captures.
 +     */
-+    sf2000_dump_ppm_from_surface(s, "gma");
++    if (dump_frame) {
++        sf2000_dump_ppm_from_surface(s, "gma");
++    }
 +    qemu_log_mask(LOG_UNIMP,
-+                  "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u\n",
++                  "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u d0=%08x d1=%08x d2=%08x d3=%08x d4=%08x d5=%08x d6=%08x d8=%08x d9=%08x\n",
 +                  dmba_addr, d7, mode, sx, sy, width, height, pitch,
-+                  have_palette);
++                  have_palette, d0, d1, d2, d3, d4, d5, d6, d8, d9);
++    return d6;
++}
++
++static void sf2000_gma_present(uint32_t dmba_addr)
++{
++    SF2000LCDState *s = sf2000_lcd;
++    uint32_t seen[8];
++    uint32_t cur = dmba_addr;
++    unsigned i;
++
++    if (!s || !cur) {
++        return;
++    }
++
++    /*
++     * Stock gma_m36f descriptors can chain visible blocks through d6. The
++     * doorbell points at the primary block, while menu OSD updates can put the
++     * region that carries the actual pixels in following blocks. Walk a small
++     * bounded chain and then dump once, after the composed frame is complete.
++     */
++    memset(seen, 0, sizeof(seen));
++    for (i = 0; i < ARRAY_SIZE(seen) && cur; i++) {
++        unsigned j;
++
++        for (j = 0; j < i; j++) {
++            if (seen[j] == cur) {
++                cur = 0;
++                break;
++            }
++        }
++        if (!cur) {
++            break;
++        }
++        seen[i] = cur;
++        cur = sf2000_gma_present_block(s, cur, false);
++    }
++    sf2000_dump_ppm_from_surface(s, "gma");
 +}
 +
 +static void sf2000_lcd_update(void *opaque)
