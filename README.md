@@ -362,8 +362,9 @@ Implemented:
 - Permissive MMIO logging from `0x10000000` to before the boot flash window.
 - A minimal RGB565 framebuffer console block at `0x18000000`.
 - Early system register defaults for chip ID, clocks, pinmux, and PLL probing.
-- A minimal timer/interrupt path sufficient for the stock ASD scheduler loop.
-- UART line capture to the QEMU log.
+- A timer/interrupt path sufficient for the stock ASD scheduler loop and early
+  Linux timer-driver research.
+- UART0/UART1 line capture and interrupt modeling to the QEMU log.
 - A minimal SDIO command and DMA read path, backed by either a raw `IF_SD`
   image named `sd0` or a synthetic FAT probe card.
 - GPIO keypad input through the L23/L24 shift-register contract, including
@@ -374,12 +375,16 @@ Implemented:
   generation.
 - A host-side `tools/mksf2000sd.c` helper that creates a tiny raw FAT image
   with `/BIOS/bisrv.asd` for bootloader diagnostics.
+- Real-device probe-derived defaults for initialized IRQ, GE/GMA, PWM, IR,
+  SDIO, watchdog, and timer register state.
 
 Not implemented yet:
 
 - A complete HC15xx display controller and panel timing model.
-- Audio, USB, SPI/NAND layout, and full low-power/standby behavior.
+- Audio, USB device enumeration, SPI/NAND layout, and full low-power/standby
+  behavior.
 - Full SD controller timing semantics.
+- A bootable Linux kernel/device-tree target.
 - Game/content launch fidelity beyond the current stock-menu bring-up path.
 
 The first practical milestone is to run stock firmware far enough to collect
