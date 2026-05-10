@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2140 @@
+@@ -0,0 +1,2283 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -105,6 +105,15 @@
 +#define SF2000_CHIP_ID_VALUE   0x1512a501
 +#define SF2000_HC15XX_CHIP_ID  0x1512
 +#define SF2000_UART1_BASE      0x18818600ULL
++#define SF2000_UART_RBR_THR    0x00
++#define SF2000_UART_IER        0x01
++#define SF2000_UART_IIR        0x02
++#define SF2000_UART_LSR        0x05
++#define SF2000_UART_IER_THRI   BIT(1)
++#define SF2000_UART_IIR_NONE   0x01
++#define SF2000_UART_IIR_THRI   0x02
++#define SF2000_UART_LSR_THRE   BIT(5)
++#define SF2000_UART_LSR_TEMT   BIT(6)
 +#define SF2000_ADC_BASE        0x18818400ULL
 +#define SF2000_ADC_SIZE        0x00000100ULL
 +#define SF2000_ADC_SAMPLE      200
@@ -135,11 +144,21 @@
 +                                SF2000_TIMER5_INDEX * SF2000_TIMER_STEP)
 +#define SF2000_SB_TIMER_BIT    22
 +#define SF2000_SB_TIMER_IRQ    (1u << SF2000_SB_TIMER_BIT)
++#define SF2000_UART1_IRQ_BIT   17
++#define SF2000_UART1_IRQ       (1u << SF2000_UART1_IRQ_BIT)
 +#define SF2000_SDIO_IRQ_BIT    10
 +#define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
++#define SF2000_GPIO_IRQ        BIT(0)
 +#define SF2000_EIRQ3_LINE      3
++#define SF2000_GPIO_L_IER      0x18800044ULL
++#define SF2000_GPIO_L_RIS_IER  0x18800048ULL
 +#define SF2000_GPIO_L_IN       0x18800050ULL
 +#define SF2000_GPIO_L_OUT      0x18800054ULL
++#define SF2000_GPIO_L_ISR      0x1880005cULL
++#define SF2000_GPIO_L08        BIT(8)
++#define SF2000_GPIO_R_IN       0x188000f0ULL
++#define SF2000_GPIO_R_ISR      0x188000fcULL
++#define SF2000_GPIO_R_POK      BIT(30)
 +#define SF2000_KEY_DATA_BIT    23
 +#define SF2000_KEY_CLK_BIT     24
 +#define SF2000_KEY_COUNT       12
@@ -168,6 +187,7 @@
 +    { 0x18800078, 0x00083700 }, { 0x1880007c, 0x000c00c0 },
 +    { 0x18800080, 0x000023c0 }, { 0x18800084, 0xa00b4000 },
 +    { 0x18800094, 0x000d0000 }, { 0x188000a4, 0x00002419 },
++    { 0x188000f0, 0x40000000 },
 +    { 0x18800140, 0x18800140 }, { 0x18800144, 0x88ff4555 },
 +    { 0x18800148, 0x08182080 }, { 0x1880014c, 0x30303006 },
 +    { 0x18800150, 0x30030010 }, { 0x18800220, 0x01000002 },
@@ -223,6 +243,8 @@
 +static SF2000LCDState *sf2000_lcd;
 +static uint32_t sf2000_rgb565_to_surface(uint16_t pix);
 +static void sf2000_gma_present(uint32_t dmba_addr);
++static bool sf2000_mmio_get32(hwaddr addr, uint32_t *value);
++static void sf2000_mmio_set32(hwaddr addr, uint32_t value);
 +
 +static struct {
 +    const char *kernel_filename;
@@ -241,6 +263,7 @@
 +static uint32_t sf2000_timer_aim[SF2000_TIMER_COUNT];
 +static uint32_t sf2000_timer_ctrl[SF2000_TIMER_COUNT];
 +static int64_t sf2000_next_tick_ns;
++static int64_t sf2000_next_vsync_ns;
 +static uint32_t sf2000_adc_ctrl[4];
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
 +static QEMUTimer *sf2000_irq_poll_timer;
@@ -258,6 +281,8 @@
 +static BlockBackend *sf2000_sdio_blk;
 +static char sf2000_uart_line[256];
 +static uint32_t sf2000_uart_line_len;
++static uint8_t sf2000_uart1_ier;
++static bool sf2000_uart1_thri_pending;
 +static uint32_t sf2000_key_mask;
 +static unsigned sf2000_key_shift_index;
 +static uint32_t sf2000_gpio_l_out;
@@ -355,6 +380,64 @@
 +    return false;
 +}
 +
++static bool sf2000_uart1_irq_pending(void)
++{
++    return sf2000_uart1_thri_pending &&
++           (sf2000_uart1_ier & SF2000_UART_IER_THRI) != 0;
++}
++
++static bool sf2000_gpio_l_vsync_enabled(void)
++{
++    uint32_t ier = 0;
++    uint32_t ris_ier = 0;
++    bool have_ier = false;
++    bool have_ris_ier = false;
++    unsigned i;
++
++    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
++        if (!sf2000_regs[i].valid) {
++            continue;
++        }
++        if (sf2000_regs[i].addr == SF2000_GPIO_L_IER) {
++            ier = sf2000_regs[i].value;
++            have_ier = true;
++        } else if (sf2000_regs[i].addr == SF2000_GPIO_L_RIS_IER) {
++            ris_ier = sf2000_regs[i].value;
++            have_ris_ier = true;
++        }
++    }
++
++    return have_ier && have_ris_ier && (ier & ris_ier & SF2000_GPIO_L08) != 0;
++}
++
++static bool sf2000_gpio_l_vsync_pending(void)
++{
++    uint32_t isr = 0;
++
++    sf2000_mmio_get32(SF2000_GPIO_L_ISR, &isr);
++    return (isr & SF2000_GPIO_L08) != 0;
++}
++
++static void sf2000_gpio_l_vsync_maybe_raise(void)
++{
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    uint32_t isr = 0;
++
++    if (now < sf2000_next_vsync_ns || !sf2000_gpio_l_vsync_enabled()) {
++        return;
++    }
++
++    /*
++     * The ST7789V tearing-effect output is routed to PINPAD_L08 and requested
++     * as a rising-edge GPIO interrupt by the stock LCD driver. A 60 Hz edge is
++     * enough to unblock wait-for-vsync users until the panel timing is more
++     * precisely modelled.
++     */
++    sf2000_mmio_get32(SF2000_GPIO_L_ISR, &isr);
++    sf2000_mmio_set32(SF2000_GPIO_L_ISR, isr | SF2000_GPIO_L08);
++    sf2000_next_vsync_ns = now + NANOSECONDS_PER_SECOND / 60;
++}
++
 +static bool sf2000_timer_pending(unsigned index)
 +{
 +    uint32_t count;
@@ -422,7 +505,14 @@
 +        return;
 +    }
 +
-+    qemu_set_irq(sf2000_eirq3, sf2000_timer5_pending() ||
++    sf2000_gpio_l_vsync_maybe_raise();
++
++    qemu_set_irq(sf2000_eirq3,
++                 (sf2000_gpio_l_vsync_pending() &&
++                  sf2000_irq1_enabled(SF2000_GPIO_IRQ)) ||
++                 (sf2000_uart1_irq_pending() &&
++                  sf2000_irq1_enabled(SF2000_UART1_IRQ)) ||
++                 sf2000_timer5_pending() ||
 +                 (sf2000_sdio_irq_pending &&
 +                  sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
 +}
@@ -449,7 +539,14 @@
 +     * byte poll makes the firmware trace much harder to mine for new gaps.
 +     */
 +    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
++        (addr == SF2000_UART1_BASE + SF2000_UART_LSR &&
++         g_str_equal(kind, "mmio-read")) ||
 +        addr == 0x1884c001 || addr == 0x1884c00b || addr == 0x1884c030 ||
++        addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||
++        addr == 0x18800058 || addr == 0x18800358 ||
++        (addr == SF2000_GPIO_L_IN && g_str_equal(kind, "mmio-read")) ||
++        (addr == SF2000_GPIO_R_IN && g_str_equal(kind, "mmio-read")) ||
++        (addr == SF2000_GPIO_R_ISR && g_str_equal(kind, "mmio-read")) ||
 +        addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2 ||
 +        (addr >= SF2000_TIMER_BASE && addr < SF2000_TIMER_BASE +
 +         SF2000_TIMER_SIZE && g_str_equal(kind, "mmio-read"))) {
@@ -1259,6 +1356,12 @@
 +        bool timer_pending = sf2000_timer5_pending();
 +
 +        value = timer_pending ? SF2000_SB_TIMER_IRQ : 0;
++        if (sf2000_gpio_l_vsync_pending()) {
++            value |= SF2000_GPIO_IRQ;
++        }
++        if (sf2000_uart1_irq_pending()) {
++            value |= SF2000_UART1_IRQ;
++        }
 +        if (sf2000_sdio_irq_pending) {
 +            value |= SF2000_SDIO_IRQ;
 +        }
@@ -1288,8 +1391,23 @@
 +        if (size < 4) {
 +            value &= (1u << (size * 8)) - 1u;
 +        }
-+    } else if (full_addr == SF2000_UART1_BASE + 5) {
-+        value = 0x60; /* THR empty + transmitter empty. */
++    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IER) {
++        value = sf2000_uart1_ier;
++    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IIR) {
++        /*
++         * The HCRTOS 16550 driver reads IIR to clear the interrupt, then
++         * treats 0x02 as transmitter-holding-register empty and completes
++         * blocked writes. The emulated FIFO drains immediately, so expose a
++         * one-shot THRI interrupt whenever THRI is enabled.
++         */
++        if (sf2000_uart1_irq_pending()) {
++            value = SF2000_UART_IIR_THRI;
++            sf2000_uart1_thri_pending = false;
++        } else {
++            value = SF2000_UART_IIR_NONE;
++        }
++    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_LSR) {
++        value = SF2000_UART_LSR_THRE | SF2000_UART_LSR_TEMT;
 +    } else if (full_addr >= SF2000_ADC_BASE &&
 +               full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
 +        value = sf2000_adc_read(full_addr, size);
@@ -1477,6 +1595,26 @@
 +        }
 +    } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
 +        sf2000_sdio_irq_pending = false;
++    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IER) {
++        sf2000_uart1_ier = value & 0xff;
++        if (sf2000_uart1_ier & SF2000_UART_IER_THRI) {
++            sf2000_uart1_thri_pending = true;
++        }
++    } else if (full_addr == SF2000_GPIO_L_ISR && (value & SF2000_GPIO_L08)) {
++        uint32_t isr = 0;
++
++        sf2000_mmio_get32(SF2000_GPIO_L_ISR, &isr);
++        sf2000_mmio_set32(SF2000_GPIO_L_ISR, isr & ~((uint32_t)value));
++    } else if (full_addr == SF2000_GPIO_R_ISR && (value & SF2000_GPIO_R_POK)) {
++        uint32_t isr = 0;
++
++        /*
++         * The stock power-detect task acknowledges the R30 power-good status
++         * by writing the same bit back to GPIO R ISR. Leaving it latched keeps
++         * the task in a tight clear/read loop before the launcher can draw.
++         */
++        sf2000_mmio_get32(SF2000_GPIO_R_ISR, &isr);
++        sf2000_mmio_set32(SF2000_GPIO_R_ISR, isr & ~((uint32_t)value));
 +    } else if (full_addr == SF2000_GPIO_L_OUT) {
 +        sf2000_gpio_l_write(sf2000_regs[i].value);
 +        sf2000_panel_gpio_write(full_addr, sf2000_regs[i].value);
@@ -1494,6 +1632,9 @@
 +        sf2000_gma_present(value);
 +    } else if (full_addr == SF2000_UART1_BASE) {
 +        sf2000_uart_put(value & 0xff);
++        if (sf2000_uart1_ier & SF2000_UART_IER_THRI) {
++            sf2000_uart1_thri_pending = true;
++        }
 +    } else if (full_addr == 0x1882e098) {
 +        sf2000_sflash_cmd = value & 0xff;
 +        qemu_log_mask(LOG_UNIMP, "sf2000: sflash-cmd cmd=0x%02x\n",
@@ -2098,6 +2239,8 @@
 +    cpu_mips_irq_init_cpu(cpu);
 +    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];
 +    sf2000_timer_ack();
++    sf2000_next_vsync_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                           NANOSECONDS_PER_SECOND / 60;
 +    sf2000_irq_poll_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
 +                                         sf2000_irq_poll_timer_cb, NULL);
 +    timer_mod(sf2000_irq_poll_timer,
