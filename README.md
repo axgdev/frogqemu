@@ -40,12 +40,21 @@ sudo apt-get install build-essential curl meson ninja-build patch pkg-config \
   dosfstools mtools unzip imagemagick ffmpeg
 ```
 
-On Fedora, use Samurai instead of Ninja if you prefer the smaller
-Ninja-compatible executor:
+On Fedora, `meson` is required by QEMU's configure step and Fedora's Meson
+package pulls in `ninja-build`, so no separate Ninja/Samurai package is needed
+for the default build:
 
 ```sh
-sudo dnf install gcc make curl meson samurai patch pkgconf-pkg-config \
+sudo dnf install gcc make curl meson patch pkgconf-pkg-config \
   glib2-devel pixman-devel python3-pip ccache
+```
+
+If you specifically want to run the generated build with Samurai, install it
+and pass `NINJA=samu`:
+
+```sh
+sudo dnf install samurai
+make build NINJA=samu
 ```
 
 Optional Fedora tools for generated SD-card images and captures:
