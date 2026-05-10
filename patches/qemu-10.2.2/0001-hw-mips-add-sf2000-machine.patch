@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2711 @@
+@@ -0,0 +1,2834 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -438,6 +438,22 @@
 +    case 0x80355770:
 +        fprintf(stderr, "sf2000: security_check arg=0x%08x ra=0x%08x\n",
 +                a0, (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    case 0x8035578c:
++        fprintf(stderr,
++                "sf2000: security_check after xmc_get_id v0=0x%08x gp=0x%08x ra=0x%08x\n",
++                (uint32_t)cpu->env.active_tc.gpr[2],
++                (uint32_t)cpu->env.active_tc.gpr[28],
++                (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    case 0x80346334:
++        fprintf(stderr,
++                "sf2000: app_main after security_check v0=0x%08x gp=0x%08x ra=0x%08x\n",
++                (uint32_t)cpu->env.active_tc.gpr[2],
++                (uint32_t)cpu->env.active_tc.gpr[28],
++                (uint32_t)cpu->env.active_tc.gpr[31]);
 +        sf2000_last_call_pc = pc;
 +        break;
 +    default:
@@ -2060,12 +2076,94 @@
 +    },
 +};
 +
++static bool sf2000_sflash_security_byte(hwaddr addr, uint8_t *byte)
++{
++    CPUState *cs = first_cpu;
++    MIPSCPU *cpu;
++    uint32_t pc;
++    uint32_t gp;
++    uint32_t challenge_ptr;
++    hwaddr source;
++    MemTxResult res;
++    uint8_t check[256];
++
++    if (!cs) {
++        return false;
++    }
++    cpu = MIPS_CPU(cs);
++    pc = (uint32_t)cpu->env.active_tc.PC;
++    if (pc < 0x80355490 || pc >= 0x803555b4) {
++        return false;
++    }
++
++    /*
++     * Stock security_check reads a tiny per-device/factory blob through
++     * xmc_security_read(). Public update bootloader images do not carry that
++     * personalized area, but the stock launcher still expects the comparison
++     * to succeed before creating the menu task. Model the minimum factory blob
++     * contract instead of patching the firmware: key bytes at 0x2000 are
++     * neutral, additive bytes at 0x10c0 are neutral, and check bytes at 0x1000
++     * are derived from the runtime challenge string whose pointer is stored at
++     * gp-30388.
++     */
++    if (addr >= 0x2000 && addr < 0x2008) {
++        *byte = 0;
++        return true;
++    }
++    if (addr >= 0x10c0 && addr < 0x11c0) {
++        *byte = 0;
++        return true;
++    }
++    if (addr < 0x1000 || addr >= 0x1100) {
++        return false;
++    }
++
++    gp = (uint32_t)cpu->env.active_tc.gpr[28];
++    source = sf2000_guest_phys_addr(gp - 30388u);
++    challenge_ptr = address_space_ldl_le(&address_space_memory, source,
++                                         MEMTXATTRS_UNSPECIFIED, &res);
++    if (res != MEMTX_OK) {
++        return false;
++    }
++    for (uint32_t i = 0; i <= (uint32_t)(addr - 0x1000); i++) {
++        uint8_t challenge;
++
++        source = sf2000_guest_phys_addr(challenge_ptr + i);
++        challenge = address_space_ldub(&address_space_memory, source,
++                                       MEMTXATTRS_UNSPECIFIED, &res);
++        if (res != MEMTX_OK) {
++            return false;
++        }
++        /*
++         * With neutral additive bytes, the stock check reduces to:
++         *   check[i] == challenge[i] ^ key[i]         for i < 8
++         *   check[i] == challenge[i] ^ check[i - 8]   for i >= 8
++         */
++        if (i < 8) {
++            uint8_t key;
++            hwaddr key_addr = sf2000_guest_phys_addr(gp - 24424u + i);
++
++            key = address_space_ldub(&address_space_memory, key_addr,
++                                     MEMTXATTRS_UNSPECIFIED, &res);
++            if (res != MEMTX_OK) {
++                return false;
++            }
++            check[i] = challenge ^ key;
++        } else {
++            check[i] = challenge ^ check[i - 8];
++        }
++    }
++    *byte = check[addr - 0x1000];
++    return true;
++}
++
 +static uint64_t sf2000_sflash_direct_read(void *opaque, hwaddr addr,
 +                                          unsigned size)
 +{
 +    static const uint8_t jedec_id[] = { 0x20, 0x40, 0x13 };
 +    uint64_t value = 0;
 +    unsigned i;
++    CPUState *cs = first_cpu;
 +
 +    for (i = 0; i < size; i++) {
 +        uint8_t byte;
@@ -2078,10 +2176,26 @@
 +            byte = jedec_id[(addr + i) % ARRAY_SIZE(jedec_id)];
 +            break;
 +        default:
-+            byte = sf2000_bootrom_bytes[(addr + i) % SF2000_BOOT_SIZE];
++            if (!sf2000_sflash_security_byte(addr + i, &byte)) {
++                byte = sf2000_bootrom_bytes[(addr + i) % SF2000_BOOT_SIZE];
++            }
 +            break;
 +        }
 +        value |= (uint64_t)byte << (i * 8);
++    }
++
++    if (g_getenv("SF2000_TRACE_PC") && cs) {
++        MIPSCPU *cpu = MIPS_CPU(cs);
++        uint32_t pc = (uint32_t)cpu->env.active_tc.PC;
++
++        if ((pc >= 0x80355088 && pc < 0x80355900) ||
++            (pc >= 0x80346324 && pc < 0x80346428)) {
++            fprintf(stderr,
++                    "sf2000: sflash-direct pc=0x%08x ra=0x%08x gp=0x%08x cmd=0x%02x off=0x%08" HWADDR_PRIx " size=%u value=0x%08" PRIx64 "\n",
++                    pc, (uint32_t)cpu->env.active_tc.gpr[31],
++                    (uint32_t)cpu->env.active_tc.gpr[28], sf2000_sflash_cmd,
++                    addr, size, value);
++        }
 +    }
 +
 +    qemu_log_mask(LOG_UNIMP,
@@ -2138,6 +2252,7 @@
 +    bool have_palette = false;
 +    uint32_t d0, d1, d2, d3, d4, d5, d6, d7, d8, d9;
 +    uint32_t mode, clut_update, sx, ex, sy, ey, src_w, src_h, pitch;
++    uint32_t sample_w, sample_h;
 +    uint32_t width, height, bpp;
 +    int y;
 +
@@ -2221,7 +2336,9 @@
 +    if (!pitch) {
 +        pitch = width * bpp;
 +    }
-+    if (pitch < width * bpp) {
++    sample_w = src_w ? src_w : width;
++    sample_h = src_h ? src_h : height;
++    if (pitch < sample_w * bpp) {
 +        return d6;
 +    }
 +
@@ -2247,23 +2364,29 @@
 +    for (y = 0; y < height; y++) {
 +        uint32_t *dst = (uint32_t *)(surface_data(surface) +
 +                        (sy + y) * surface_stride(surface)) + sx;
++        uint32_t src_y = ((uint64_t)y * sample_h) / height;
 +        int x;
 +
-+        if (address_space_read(&address_space_memory, d7 + (uint64_t)y * pitch,
++        if (address_space_read(&address_space_memory,
++                               d7 + (uint64_t)src_y * pitch,
 +                               MEMTXATTRS_UNSPECIFIED, linebuf,
 +                               pitch) != MEMTX_OK) {
 +            break;
 +        }
 +        for (x = 0; x < width; x++) {
++            uint32_t src_x = ((uint64_t)x * sample_w) / width;
++
 +            if (mode == 0x06) {
-+                dst[x] = sf2000_rgb565_to_surface(lduw_le_p(linebuf + x * 2));
++                dst[x] = sf2000_rgb565_to_surface(
++                    lduw_le_p(linebuf + src_x * 2));
 +            } else if (mode == 0x01) {
-+                dst[x] = sf2000_argb8888_to_surface(ldl_le_p(linebuf + x * 4));
++                dst[x] = sf2000_argb8888_to_surface(
++                    ldl_le_p(linebuf + src_x * 4));
 +            } else if (have_palette) {
 +                dst[x] = sf2000_argb8888_to_surface(
-+                    ldl_le_p(palette + linebuf[x] * 4));
++                    ldl_le_p(palette + linebuf[src_x] * 4));
 +            } else {
-+                uint8_t c = linebuf[x];
++                uint8_t c = linebuf[src_x];
 +                dst[x] = 0xff000000u | (c << 16) | (c << 8) | c;
 +            }
 +        }
