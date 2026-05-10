@@ -114,6 +114,10 @@ RAM size, CPU clock, and peripheral base addresses. The stock SF2000 boot path
 does not currently consume a DTB, so DTB support should stay a research and
 open-firmware aid unless a boot path explicitly needs it.
 
+Device-family differences are tracked in [docs/DEVICE_FAMILY.md](docs/DEVICE_FAMILY.md).
+That file records the current LCD panel readback groups and the boundary
+between shared SoC modeling and board-specific peripherals.
+
 The machine model is target-MIPS, not host-architecture-specific. Building on
 an x86_64 Linux host produces a native x86_64 `qemu-system-mipsel` binary at
 the same path:
