@@ -63,6 +63,15 @@ Optional Fedora tools for generated SD-card images and captures:
 sudo dnf install dosfstools mtools unzip ImageMagick ffmpeg
 ```
 
+For interactive VNC testing from Fedora Workstation, GNOME Connections works
+well. TigerVNC's viewer is a lightweight terminal-installable alternative:
+
+```sh
+sudo dnf install gnome-connections
+# or:
+sudo dnf install tigervnc
+```
+
 The debug target expects the project toolchain GDB at:
 
 ```sh
@@ -197,6 +206,46 @@ vnc://host:5901
 ```
 
 Logs are written to `build/logs/sf2000.log`.
+
+To boot the stock UI with a generated vanilla SD image, use:
+
+```sh
+make run-vnc-vanilla
+```
+
+This target downloads the public vanilla SF2000 OS files, creates
+`build/sf2000-vanilla.sd.img`, boots the bugfixed stock bootloader, and exposes
+the emulator over VNC. It is the easiest path for testing the visible menu from
+a Fedora desktop. Connect to:
+
+```text
+vnc://127.0.0.1:5901
+```
+
+For a headless Fedora host on the LAN:
+
+```sh
+make run-vnc-vanilla VNC=0.0.0.0:1
+sudo firewall-cmd --add-port=5901/tcp
+```
+
+Then connect from GNOME Connections or TigerVNC to `vnc://host:5901`.
+
+Computer keyboard mapping:
+
+| SF2000 control | Keyboard key |
+| --- | --- |
+| D-pad | Arrow keys |
+| Start | Enter |
+| Select | Backspace |
+| A | X |
+| B | Z |
+| X | S |
+| Y | A |
+| L | Q |
+| R | W |
+
+The VNC viewer must have keyboard focus for these events to reach QEMU.
 
 Without `SD_IMAGE`, the SD controller serves a tiny synthetic FAT32-like probe
 card that is enough for the stock firmware to mount in direct ASD mode. To

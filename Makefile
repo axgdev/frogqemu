@@ -42,14 +42,14 @@ VIDEO_GMA_DUMP_LIMIT ?= 300
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps build-info ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps build-info ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-vnc-vanilla run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
-		'  make deps          show required Alpine packages' \
+		'  make deps          show required host packages' \
 		'  make build-info    show host/build configuration' \
 		'  make ccache-stats  show ccache statistics when ccache is installed' \
 		'  make build         fetch, patch, configure, and build QEMU' \
@@ -65,6 +65,7 @@ help:
 		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
 		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
+		'  make run-vnc-vanilla run stock UI with generated vanilla SD image' \
 		'  make capture-stock-ui write screendump and GMA frames to build/screenshots' \
 		'  make capture-vanilla-ui download vanilla OS files and capture GMA frames' \
 		'  make capture-vanilla-video write a short MP4 from captured GMA frames' \
@@ -78,8 +79,10 @@ help:
 deps:
 	@printf '%s\n' \
 		'apk add --no-cache curl meson samurai patch pkgconf glib-dev pixman-dev py3-pip py3-distlib' \
+		'fedora: sudo dnf install gcc make curl meson patch pkgconf-pkg-config glib2-devel pixman-devel python3-pip ccache' \
 		'optional for faster rebuilds: apk add --no-cache ccache' \
 		'optional for vanilla-sd: apk add --no-cache dosfstools mtools unzip' \
+		'fedora optional for vanilla-sd: sudo dnf install dosfstools mtools unzip' \
 		'optional for captures/video: apk add --no-cache imagemagick ffmpeg'
 
 build-info:
@@ -171,6 +174,14 @@ vanilla-sd: $(VANILLA_SD_IMAGE)
 run-vnc: build
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
+		-display vnc=$(VNC) \
+		-serial none -monitor stdio \
+		-d guest_errors,unimp -D $(LOG)
+
+run-vnc-vanilla: build $(VANILLA_SD_IMAGE)
+	mkdir -p $(dir $(LOG))
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
