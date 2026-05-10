@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2858 @@
+@@ -0,0 +1,2880 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -85,6 +85,9 @@
 +#define SF2000_BOOT_BASE       0x1fc00000ULL
 +#define SF2000_BOOT_ALIAS_BASE 0x0fc00000ULL
 +#define SF2000_BOOT_SIZE       (4 * MiB)
++#define SF2000_CPU_DEFAULT_HZ  918000000ULL
++#define SF2000_CPU_MIN_HZ      1000000ULL
++#define SF2000_CPU_MAX_HZ      918000000ULL
 +#define SF2000_BL_FLASH_OFF    0x00005c00ULL
 +#define SF2000_BL_RAM_BASE     0x01000000ULL
 +#define SF2000_BL_ENTRY        0x81000490ULL
@@ -246,6 +249,25 @@
 +static void sf2000_gma_present(uint32_t dmba_addr);
 +static bool sf2000_mmio_get32(hwaddr addr, uint32_t *value);
 +static void sf2000_mmio_set32(hwaddr addr, uint32_t value);
++
++static uint64_t sf2000_cpu_hz(void)
++{
++    const char *env = g_getenv("SF2000_CPU_HZ");
++    uint64_t hz;
++
++    if (!env || !*env) {
++        return SF2000_CPU_DEFAULT_HZ;
++    }
++
++    hz = g_ascii_strtoull(env, NULL, 0);
++    if (hz < SF2000_CPU_MIN_HZ || hz > SF2000_CPU_MAX_HZ) {
++        warn_report("sf2000: ignoring invalid SF2000_CPU_HZ=%s, using %" PRIu64,
++                    env, (uint64_t)SF2000_CPU_DEFAULT_HZ);
++        return SF2000_CPU_DEFAULT_HZ;
++    }
++
++    return hz;
++}
 +
 +static struct {
 +    const char *kernel_filename;
@@ -2809,7 +2831,7 @@
 +    }
 +
 +    cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
-+    clock_set_hz(cpuclk, 396000000);
++    clock_set_hz(cpuclk, sf2000_cpu_hz());
 +    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
 +    cpu_mips_irq_init_cpu(cpu);
 +    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];

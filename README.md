@@ -215,7 +215,13 @@ si
 
 Implemented:
 
-- MIPS little-endian `24Kc` CPU model with a 396 MHz reference clock.
+- MIPS little-endian `24Kc` CPU model with a 918 MHz default reference clock.
+  This matches the original maximum CPU frequency. Lower-frequency research
+  runs can use `SF2000_CPU_HZ=<hz>`, for example:
+
+  ```sh
+  SF2000_CPU_HZ=396000000 make run-vnc SD_IMAGE=/path/to/sd.img
+  ```
 - 128 MiB RAM at physical `0x00000000`.
 - Boot flash image at physical `0x1fc00000`, matching the MIPS reset alias at
   virtual `0xbfc00000`.
