@@ -149,6 +149,7 @@ git. Put the firmware blobs there with these names:
 firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
 firmware/bisrv_08_03.asd
+firmware/bisrv_gb300_v2.asd
 ```
 
 The vanilla VNC target only needs the bugfixed bootloader in
@@ -160,6 +161,7 @@ If you keep the files elsewhere, use a local untracked `config.mk`:
 FIRMWARE_BUGFIX := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
 FIRMWARE := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 ASD := /home/me/firmware/bisrv_08_03.asd
+GB300_ASD := /home/me/firmware/bisrv_gb300_v2.asd
 ```
 
 Run the current direct stock ASD bring-up smoke with:
@@ -171,6 +173,9 @@ make smoke-stock-full-bugfix
 make smoke-stock-asd
 make smoke-stock-fatfs
 make smoke-stock-display
+make smoke-gb300-asd
+make smoke-gb300-fatfs
+make smoke-gb300-display
 make smoke-input
 ```
 
@@ -200,6 +205,11 @@ success message.
 scanout path and emits both the CLUT8 splash/menu descriptor and later RGB565
 framebuffer descriptor. The emulator currently bridges the ST7789 panel init
 sequence to QEMU display output by decoding those GMA descriptor writes.
+
+`make smoke-gb300-fatfs` and `make smoke-gb300-display` run the GB300 v2 ASD
+directly on the same SF2000-family SoC model. The current GB300 path reaches
+ST7789V MCU8080 panel setup, GMA scanout, SDIO initialization, and FatFs mount
+with synthetic media.
 
 `make smoke-input` checks that QEMU monitor/VNC key events reach the emulated
 SF2000 keypad. The stock launcher uses an active-low L23/L24 shift register,

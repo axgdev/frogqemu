@@ -30,6 +30,7 @@ FIRMWARE_DIR ?= firmware
 FIRMWARE ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit.bin
 FIRMWARE_BUGFIX ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
 ASD ?= $(FIRMWARE_DIR)/bisrv_08_03.asd
+GB300_ASD ?= /root/host-frogdev/universal/sf2000_gb300_multicore_private/bisrv_gb300_v2.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
@@ -46,7 +47,7 @@ SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
 -include config.mk
 
-.PHONY: all help deps build-info check-firmware check-bugfix-firmware check-asd ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-vnc-vanilla run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+.PHONY: all help deps build-info check-firmware check-bugfix-firmware check-asd check-gb300-asd ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-vnc-vanilla run-headless boot-stock-asd boot-gb300-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display smoke-gb300-asd smoke-gb300-fatfs smoke-gb300-display clean distclean
 
 all: build
 
@@ -68,6 +69,8 @@ help:
 		'  make smoke-stock-asd verify direct stock ASD boot reaches early MMIO' \
 		'  make smoke-stock-fatfs verify stock ASD reaches SD/FatFs mount' \
 		'  make smoke-stock-display verify stock ASD drives GMA scanout' \
+		'  make smoke-gb300-fatfs verify direct GB300 ASD reaches SD/FatFs mount' \
+		'  make smoke-gb300-display verify direct GB300 ASD drives GMA scanout' \
 		'  make run-vnc       run with VNC display, default 127.0.0.1:5901' \
 		'  make run-vnc SD_IMAGE=/path/sd.img attach a raw SD-card image' \
 		'  make run-vnc-vanilla run stock UI with generated vanilla SD image' \
@@ -76,6 +79,7 @@ help:
 		'  make capture-vanilla-video write a short MP4 from captured GMA frames' \
 		'  make vanilla-sd    build a generated FAT32 image from the vanilla OS zip' \
 		'  make boot-stock-asd run stock boot ROM plus direct stock ASD load' \
+		'  make boot-gb300-asd run stock boot ROM plus direct GB300 ASD load' \
 		'  make debug         run paused with GDB stub on :1234' \
 		'  make gdb           connect mipsel-mti-elf-gdb to :1234' \
 		'  make clean         remove QEMU build directory only' \
@@ -100,6 +104,7 @@ build-info:
 	@printf 'firmware: %s\n' '$(FIRMWARE)'
 	@printf 'bugfix firmware: %s\n' '$(FIRMWARE_BUGFIX)'
 	@printf 'asd: %s\n' '$(ASD)'
+	@printf 'gb300 asd: %s\n' '$(GB300_ASD)'
 
 check-firmware:
 	@test -f '$(FIRMWARE)' || { \
@@ -119,6 +124,13 @@ check-asd:
 	@test -f '$(ASD)' || { \
 		printf 'missing ASD: %s\n' '$(ASD)' >&2; \
 		printf 'copy it into firmware/ or set it with: make <target> ASD=/path/to/bisrv_08_03.asd\n' >&2; \
+		exit 1; \
+	}
+
+check-gb300-asd:
+	@test -f '$(GB300_ASD)' || { \
+		printf 'missing GB300_ASD: %s\n' '$(GB300_ASD)' >&2; \
+		printf 'set it with: make <target> GB300_ASD=/path/to/bisrv_gb300_v2.asd\n' >&2; \
 		exit 1; \
 	}
 
@@ -222,6 +234,13 @@ run-headless: build check-firmware
 boot-stock-asd: build check-firmware check-asd
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) $(SD_ARGS) \
+		-display vnc=$(VNC) \
+		-serial none -monitor stdio \
+		-d guest_errors,unimp -D $(LOG)
+
+boot-gb300-asd: build check-firmware check-gb300-asd
+	mkdir -p $(dir $(LOG))
+	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) $(SD_ARGS) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
@@ -395,6 +414,35 @@ smoke-stock-display: build
 	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-display.console
 	grep -q 'gma-present .*mode=12' build/logs/smoke-stock-display.log
 	grep -q 'gma-present .*mode=6' build/logs/smoke-stock-display.log
+
+smoke-gb300-asd: build check-gb300-asd
+	mkdir -p build/logs
+	timeout 3s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-gb300-asd.log \
+		> build/logs/smoke-gb300-asd.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-gb300-asd.console
+	grep -q 'uart: adc_attach' build/logs/smoke-gb300-asd.log
+
+smoke-gb300-fatfs: build check-gb300-asd
+	mkdir -p build/logs
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-gb300-fatfs.log \
+		> build/logs/smoke-gb300-fatfs.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-gb300-fatfs.console
+	grep -q 'uart: \[FS\]successed!' build/logs/smoke-gb300-fatfs.log
+
+smoke-gb300-display: build check-gb300-asd
+	mkdir -p build/logs
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) \
+		-display none -serial none -monitor none \
+		-d guest_errors,unimp -D build/logs/smoke-gb300-display.log \
+		> build/logs/smoke-gb300-display.console 2>&1 || test $$? -eq 124
+	grep -q 'sf2000: loaded ASD' build/logs/smoke-gb300-display.console
+	grep -q 'uart: L115(board.c):LCD_TYPE_ST7789V_MCU8080' build/logs/smoke-gb300-display.log
+	grep -q 'gma-present .*mode=12' build/logs/smoke-gb300-display.log
+	grep -q 'gma-present .*mode=6' build/logs/smoke-gb300-display.log
 
 clean:
 	rm -rf $(QEMU_SRC)/build

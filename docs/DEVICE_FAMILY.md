@@ -64,6 +64,48 @@ until a board selector is needed. The next modelable board differences are:
   The private symbol script maps both SF2000 and GB300 firmware addresses:
   `/root/host-frogdev/universal/sf2000_gb300_multicore_private/scripts/firmware-symbol.py`.
 
+## Current GB300 Boot Status
+
+The GB300 v2 ASD now has first-class direct-boot smoke targets:
+
+```sh
+make smoke-gb300-asd
+make smoke-gb300-fatfs
+make smoke-gb300-display
+```
+
+These targets run the GB300 firmware through the same `sf2000` machine because
+the currently modeled hardware is common HC15xx/SF2000-family SoC behavior.
+With no SD image attached, the synthetic FAT probe media is enough for GB300
+stock firmware to initialize SDIO and reach `[FS]successed!`. The GB300 display
+path also reaches ST7789V MCU8080 panel setup and GMA scanout. Current logs show
+the GB300 panel init opening a rotated 240x320 RAM window before the firmware
+switches to GMA descriptors; that should become a board-profile display detail
+once panel readback emulation is implemented.
+
+## Controller and USB Evidence
+
+Current evidence suggests:
+
+- SF2000 stock firmware has explicit RF wireless-controller support. Its ASD
+  contains `RF_IC Test Pass!` / `RF_IC Test Fail !` strings, UniFrog confirmed
+  the GPIO-bitbanged RF IC on L27/L28/L29, and QEMU now models that idle RF bus.
+- GB300 v2 stock firmware does not expose the same RF test strings in a simple
+  string scan. The multicore private repository has a `wireless-probe` test core
+  that can sample both SF2000 and GB300 stock input globals, but the current
+  source comments and build instructions are SF2000-oriented. Treat GB300 RF
+  wireless as unproven until a hardware probe shows activity on the same GPIO
+  RF bus or another receiver path.
+- Both SF2000 and GB300 stock ASD images contain USB attach/detach and USB LUN
+  strings. That is solid evidence for USB mass-storage handling in the stock
+  stack, not by itself proof of USB HID gamepad support.
+- The HCRTOS DTS files for HC15xx boards, including UniFrog's `sf2000_min.dts`,
+  describe two USB controller blocks at physical `0x18844000` and `0x18850000`
+  with host mode capability, but the SF2000 minimal DTS keeps them disabled.
+  The SoC can plausibly support USB controllers if the board exposes the pins,
+  supplies VBUS power, and enables the host/HID stack. For retail SF2000, board
+  wiring and power are still the gating unknowns.
+
 The immediate emulator goal is not to make every board boot by special casing
 firmware quirks. It is to make common SoC behavior accurate, expose board
 differences as data, and use stock firmware plus UniFrog probes to converge on
