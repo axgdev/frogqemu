@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2506 @@
+@@ -0,0 +1,2550 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -55,6 +55,7 @@
 +#include "system/blockdev.h"
 +#include "system/reset.h"
 +#include "system/dma.h"
++#include "exec/tb-flush.h"
 +#include "ui/input.h"
 +#include "qom/object.h"
 +#include "target/mips/internal.h"
@@ -292,6 +293,7 @@
 +static const char *sf2000_last_pc_landmark;
 +static unsigned sf2000_pc_sample_count;
 +static uint32_t sf2000_last_call_pc;
++static bool sf2000_stock_security_patched;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
@@ -495,6 +497,47 @@
 +static uint32_t sf2000_timer_ms(void)
 +{
 +    return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000000);
++}
++
++static void sf2000_patch_stock_security_check(void)
++{
++    static const uint8_t patch[] = {
++        0x01, 0x00, 0x02, 0x24, /* li v0,1 */
++        0x08, 0x00, 0xe0, 0x03, /* jr ra */
++        0x00, 0x00, 0x00, 0x00, /* nop */
++    };
++    uint8_t current[sizeof(patch)];
++    CPUState *cs = first_cpu;
++    MIPSCPU *cpu;
++
++    if (sf2000_stock_security_patched ||
++        !g_getenv("SF2000_PATCH_STOCK_SECURITY")) {
++        return;
++    }
++    if (!cs) {
++        return;
++    }
++    cpu = MIPS_CPU(cs);
++    if ((uint32_t)cpu->env.active_tc.PC >= 0x81000000U) {
++        return;
++    }
++
++    /*
++     * The stock ASD is stored with a 0x200-byte pack header. The bootloader
++     * copies file offset N to physical N. The nearest public symbol is
++     * 0x80355770, but the prologue begins one instruction earlier at
++     * 0x8035576c, which maps to physical/file offset 0x0035596c.
++     */
++    cpu_physical_memory_read(0x0035596c, current, sizeof(current));
++    if (current[0] == 0x40 && current[1] == 0xfe &&
++        current[2] == 0xbd && current[3] == 0x27 &&
++        current[4] == 0xb4 && current[5] == 0xbb &&
++        current[6] == 0xa5 && current[7] == 0x24) {
++        cpu_physical_memory_write(0x0035596c, patch, sizeof(patch));
++        queue_tb_flush(cs);
++        sf2000_stock_security_patched = true;
++        warn_report("sf2000: patched stock security_check for diagnostic boot");
++    }
 +}
 +
 +static bool sf2000_timer_is_sec_ms(unsigned index)
@@ -720,6 +763,7 @@
 +     * activity. Re-evaluate the level periodically so QEMU can assert EIRQ3
 +     * after virtual time advances instead of only during register accesses.
 +     */
++    sf2000_patch_stock_security_check();
 +    sf2000_trace_pc_landmark();
 +    sf2000_update_irq();
 +    timer_mod(sf2000_irq_poll_timer,
