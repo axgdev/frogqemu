@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2295 @@
+@@ -0,0 +1,2416 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -278,6 +278,7 @@
 +static bool sf2000_sdio_xfer_busy;
 +static bool sf2000_sdio_irq_pending;
 +static bool sf2000_sdio_callback_pending;
++static bool sf2000_sb_timer_irq_masked;
 +static BlockBackend *sf2000_sdio_blk;
 +static char sf2000_uart_line[256];
 +static uint32_t sf2000_uart_line_len;
@@ -288,11 +289,19 @@
 +static uint32_t sf2000_gpio_l_out;
 +static unsigned sf2000_gma_dump_count;
 +static unsigned sf2000_ge_queue_dump_count;
++static const char *sf2000_last_pc_landmark;
++static unsigned sf2000_pc_sample_count;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
 +    uint32_t mask;
 +} SF2000KeyMap;
++
++typedef struct SF2000PCLandmark {
++    uint32_t start;
++    uint32_t end;
++    const char *name;
++} SF2000PCLandmark;
 +
 +enum {
 +    SF2000_KEY_R = 0,
@@ -323,6 +332,70 @@
 +    { Q_KEY_CODE_Q, BIT(SF2000_KEY_L) },
 +    { Q_KEY_CODE_W, BIT(SF2000_KEY_R) },
 +};
++
++static const SF2000PCLandmark sf2000_pc_landmarks[] = {
++    /*
++     * These ranges come from orig_firmware/symbols/bisrv_08_03_symbols.csv.
++     * They are not used for emulation behavior; they are progress breadcrumbs
++     * for long stock-firmware runs where a full instruction trace would be too
++     * large. Keep them broad enough that a periodic sample can catch the task
++     * even when it does not land exactly on a function entry.
++     */
++    { 0x802a8700, 0x802a876c, "file_open" },
++    { 0x802a8800, 0x802a8850, "file_read" },
++    { 0x80346324, 0x8034c248, "app_main" },
++    { 0x8034ce14, 0x8034cf24, "run_blit_from_file" },
++    { 0x8034d984, 0x8034de50, "run_menu_readdir_user" },
++    { 0x8034e960, 0x8034f618, "run_emulator_menu" },
++    { 0x8034f854, 0x80354f74, "run_menu" },
++    { 0x8035a794, 0x8035f97c, "run_game" },
++    { 0x8035f97c, 0x80365c34, "unwqw_decompress" },
++};
++
++static void sf2000_trace_pc_landmark(void)
++{
++    CPUState *cs = first_cpu;
++    MIPSCPU *cpu;
++    uint32_t pc;
++    bool stderr_trace = g_getenv("SF2000_TRACE_PC") != NULL;
++    unsigned i;
++
++    if (!cs) {
++        return;
++    }
++
++    cpu = MIPS_CPU(cs);
++    pc = (uint32_t)cpu->env.active_tc.PC;
++    for (i = 0; i < ARRAY_SIZE(sf2000_pc_landmarks); i++) {
++        const SF2000PCLandmark *landmark = &sf2000_pc_landmarks[i];
++
++        if (pc >= landmark->start && pc < landmark->end) {
++            if (sf2000_last_pc_landmark != landmark->name) {
++                if (stderr_trace) {
++                    fprintf(stderr,
++                            "sf2000: pc-landmark %s pc=0x%08x ra=0x%08x sp=0x%08x\n",
++                            landmark->name, pc,
++                            (uint32_t)cpu->env.active_tc.gpr[31],
++                            (uint32_t)cpu->env.active_tc.gpr[29]);
++                }
++                qemu_log_mask(LOG_UNIMP,
++                              "sf2000: pc-landmark %s pc=0x%08x ra=0x%08x sp=0x%08x\n",
++                              landmark->name, pc,
++                              (uint32_t)cpu->env.active_tc.gpr[31],
++                              (uint32_t)cpu->env.active_tc.gpr[29]);
++                sf2000_last_pc_landmark = landmark->name;
++            }
++            return;
++        }
++    }
++
++    if (stderr_trace && (++sf2000_pc_sample_count % 1000) == 0) {
++        fprintf(stderr, "sf2000: pc-sample pc=0x%08x ra=0x%08x sp=0x%08x\n",
++                pc, (uint32_t)cpu->env.active_tc.gpr[31],
++                (uint32_t)cpu->env.active_tc.gpr[29]);
++    }
++    sf2000_last_pc_landmark = NULL;
++}
 +
 +static uint32_t sf2000_timer_ticks(void)
 +{
@@ -492,6 +565,38 @@
 +    return sf2000_timer_pending(SF2000_TIMER5_INDEX);
 +}
 +
++static bool sf2000_sb_timer_pending(void)
++{
++    unsigned i;
++
++    if (!sf2000_irq1_enabled(SF2000_SB_TIMER_IRQ)) {
++        return false;
++    }
++
++    if (sf2000_timer5_pending()) {
++        return true;
++    }
++
++    /*
++     * HCRTOS names bank-1 bit 22 as the south-bridge timer interrupt, not a
++     * TIMER5-only interrupt. The stock menu path arms TIMER0 after the SD
++     * mount callback and then waits for an IRQ-driven timeout wakeup before it
++     * opens menu assets. Route any explicitly configured timer through the same
++     * bank bit, while leaving unconfigured TIMER0/TIMER1 quiet so boot does not
++     * see a stuck interrupt.
++     */
++    for (i = 0; i < SF2000_TIMER_COUNT; i++) {
++        if (i == SF2000_TIMER5_INDEX) {
++            continue;
++        }
++        if (sf2000_timer_pending(i)) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
 +static void sf2000_timer_ack(void)
 +{
 +    sf2000_next_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -512,7 +617,7 @@
 +                  sf2000_irq1_enabled(SF2000_GPIO_IRQ)) ||
 +                 (sf2000_uart1_irq_pending() &&
 +                  sf2000_irq1_enabled(SF2000_UART1_IRQ)) ||
-+                 sf2000_timer5_pending() ||
++                 (sf2000_sb_timer_pending() && !sf2000_sb_timer_irq_masked) ||
 +                 (sf2000_sdio_irq_pending &&
 +                  sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
 +}
@@ -525,6 +630,7 @@
 +     * activity. Re-evaluate the level periodically so QEMU can assert EIRQ3
 +     * after virtual time advances instead of only during register accesses.
 +     */
++    sf2000_trace_pc_landmark();
 +    sf2000_update_irq();
 +    timer_mod(sf2000_irq_poll_timer,
 +              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -1354,7 +1460,7 @@
 +    unsigned i;
 +
 +    if (full_addr == SF2000_IRQ_STATUS1) {
-+        bool timer_pending = sf2000_timer5_pending();
++        bool timer_pending = sf2000_sb_timer_pending();
 +        bool gpio_vsync_pending = sf2000_gpio_l_vsync_pending();
 +
 +        value = timer_pending ? SF2000_SB_TIMER_IRQ : 0;
@@ -1377,6 +1483,18 @@
 +         */
 +        if (timer_pending && !sf2000_timer5_configured()) {
 +            sf2000_timer_ack();
++        }
++        if (timer_pending) {
++            /*
++             * The interrupt controller reports the south-bridge timer as an
++             * edge to the CPU. If the emulated EIRQ3 line remains level-high
++             * after the aggregate status read, the stock handler re-enters
++             * before it reaches the per-timer clear path and trips its nested
++             * interrupt guard. Mask only the CPU line for this timer edge; the
++             * child timer control register still exposes INT_ST until firmware
++             * acknowledges or reprograms it.
++             */
++            sf2000_sb_timer_irq_masked = true;
 +        }
 +        if (gpio_vsync_pending) {
 +            /*
@@ -1575,6 +1693,7 @@
 +            break;
 +        case 8:
 +            sf2000_timer_ctrl[timer_index] = value & ~SF2000_TIMER_CTRL_INT;
++            sf2000_sb_timer_irq_masked = false;
 +            if (value & SF2000_TIMER_CTRL_INT) {
 +                if (timer_index == 0 || timer_index == 1) {
 +                    sf2000_sdio_callback_pending = false;
@@ -1617,13 +1736,15 @@
 +
 +        sf2000_mmio_get32(SF2000_GPIO_L_ISR, &isr);
 +        sf2000_mmio_set32(SF2000_GPIO_L_ISR, isr & ~((uint32_t)value));
-+    } else if (full_addr == SF2000_GPIO_R_ISR && (value & SF2000_GPIO_R_POK)) {
++    } else if (full_addr == SF2000_GPIO_R_ISR) {
 +        uint32_t isr = 0;
 +
 +        /*
-+         * The stock power-detect task acknowledges the R30 power-good status
-+         * by writing the same bit back to GPIO R ISR. Leaving it latched keeps
-+         * the task in a tight clear/read loop before the launcher can draw.
++         * GPIO ISR registers are write-one-to-clear. The stock power-detect
++         * code uses R30 for power-good and R31 for the power-alert latch; if
++         * either acknowledgement is stored as a normal register write, the
++         * firmware re-enters the low-power alert path and never reaches the
++         * launcher.
 +         */
 +        sf2000_mmio_get32(SF2000_GPIO_R_ISR, &isr);
 +        sf2000_mmio_set32(SF2000_GPIO_R_ISR, isr & ~((uint32_t)value));
