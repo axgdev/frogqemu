@@ -249,7 +249,7 @@ static const SF2000RegDefault sf2000_reg_defaults[] = {
     { 0x18800348, 0xffff8183 }, { 0x18800350, 0x00000083 },
     { 0x18800354, 0x00080283 }, { 0x18800358, 0x0008feff },
     { 0x18800380, 0x812b0900 }, { 0x18800384, 0x02000040 },
-    { 0x18800388, 0x0000005d }, { 0x188003cc, 0x00005555 },
+    { 0x18800388, 0x0000005f }, { 0x188003cc, 0x00005555 },
     { 0x18800470, 0x0021001a }, { 0x18800478, 0x011c000d },
     { 0x18800480, 0x0022001a }, { 0x188004a0, 0x06060000 },
     { 0x188004a4, 0x06060606 }, { 0x188004a8, 0x01060600 },
@@ -264,7 +264,7 @@ static const SF2000RegDefault sf2000_reg_defaults[] = {
     { 0x18806020, 0x00000000 }, { 0x18806024, 0x00000000 },
     { 0x18806028, 0x00000000 },
     { 0x18808000, 0x00000015 }, { 0x18808004, 0x00100814 },
-    { 0x18808008, 0x011e0000 }, { 0x1880800c, 0x01300378 },
+    { 0x18808008, 0x00ea0000 }, { 0x1880800c, 0x01300378 },
     { 0x18808080, 0x00020702 }, { 0x18808084, 0x00127002 },
     { 0x18808088, 0x00108080 }, { 0x1880808c, 0x00000004 },
     { 0x18818100, 0x00050000 }, { 0x18818104, 0x00000000 },
@@ -279,7 +279,7 @@ static const SF2000RegDefault sf2000_reg_defaults[] = {
     { 0x18818a00, 0xffffffff }, { 0x18818a04, 0x697703e7 },
     { 0x18818a10, 0xffffffff }, { 0x18818a14, 0x697703e7 },
     { 0x18818a20, 0x00000000 }, { 0x18818a24, 0x00000000 },
-    { 0x18818a30, 0x00276c9b }, { 0x18818a34, 0x00000000 },
+    { 0x18818a30, 0x00275ea9 }, { 0x18818a34, 0x00000000 },
     { 0x1882e098, 0xc1000103 }, { 0x1882e09c, 0x00000000 },
     { 0x1882e0a0, 0x00000000 },
     { 0x1884c000, 0x058de414 }, { 0x1884c004, 0xb3690000 },
@@ -1854,11 +1854,11 @@ static uint8_t sf2000_rf_read_reg(uint8_t reg)
         return sf2000_rf_regs[reg] ? sf2000_rf_regs[reg] : 0xa5;
     case 0x07:
         /*
-         * Packet-ready/status. Zero means no wireless packet is pending. The
-         * frontend can still use the local keypad path while the RF receiver
-         * is idle, and later packet injection can hang off this register.
+         * Packet-ready/status. UniFrog's real-device probe observed 0x0e while
+         * the bus was healthy and no wireless packet was pending. Bit 0x40 is
+         * the packet-ready bit used by UniFrog, so this remains an idle state.
          */
-        return 0x00;
+        return 0x0e;
     case 0x61:
         return 0x00;
     default:
