@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2857 @@
+@@ -0,0 +1,2858 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -880,7 +880,8 @@
 +    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
 +        (addr == SF2000_UART1_BASE + SF2000_UART_LSR &&
 +         g_str_equal(kind, "mmio-read")) ||
-+        addr == 0x1884c001 || addr == 0x1884c00b || addr == 0x1884c030 ||
++        (addr >= 0x1884c000 && addr < 0x1884c040) ||
++        (addr >= 0x1882e098 && addr < 0x1882e0a4) ||
 +        addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||
 +        addr == 0x18800058 || addr == 0x18800358 ||
 +        addr == 0x1880a038 || addr == 0x1880a03a ||
