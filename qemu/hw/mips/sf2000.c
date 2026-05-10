@@ -283,6 +283,8 @@ static bool sf2000_sdio_xfer_done;
 static bool sf2000_sdio_xfer_busy;
 static bool sf2000_sdio_irq_pending;
 static bool sf2000_sdio_callback_pending;
+static bool sf2000_sdio_app_cmd;
+static uint8_t sf2000_sdio_bus_width;
 static bool sf2000_sb_timer_irq_masked;
 static BlockBackend *sf2000_sdio_blk;
 static char sf2000_uart_line[256];
@@ -1472,10 +1474,12 @@ static void sf2000_sdio_dma_read(uint32_t lba)
      * the firmware's asynchronous disk layer. Raising both keeps bootloader
      * sector reads and stock firmware FatFs mounting on the same model.
      */
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: sdio-dma-read lba=%u sectors=%u dst=0x%08x len=%u copied=%u image=%d result=%d\n",
-                  lba, sectors, sf2000_sdio_dma_addr, len, copied,
-                  image_backed, result);
+    if (sf2000_trace_sdio()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: sdio-dma-read lba=%u sectors=%u dst=0x%08x len=%u copied=%u image=%d result=%d\n",
+                      lba, sectors, sf2000_sdio_dma_addr, len, copied,
+                      image_backed, result);
+    }
 }
 
 static bool sf2000_sdio_dma_write_image_bulk(uint32_t lba, uint32_t len,
@@ -1546,14 +1550,18 @@ static void sf2000_sdio_dma_write(uint32_t lba)
     sf2000_sdio_xfer_busy = false;
     sf2000_sdio_irq_pending = true;
     sf2000_sdio_callback_pending = true;
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: sdio-dma-write lba=%u sectors=%u src=0x%08x len=%u copied=%u image=%d dma=%d blk=%d\n",
-                  lba, sectors, sf2000_sdio_dma_addr, len, copied,
-                  image_backed, dma_result, blk_result);
+    if (sf2000_trace_sdio()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: sdio-dma-write lba=%u sectors=%u src=0x%08x len=%u copied=%u image=%d dma=%d blk=%d\n",
+                      lba, sectors, sf2000_sdio_dma_addr, len, copied,
+                      image_backed, dma_result, blk_result);
+    }
 }
 
 static void sf2000_sdio_complete_cmd(void)
 {
+    bool is_app_cmd = sf2000_sdio_app_cmd && sf2000_sdio_cmd != 55;
+
     sf2000_sdio_resp[0] = 0;
     sf2000_sdio_resp[1] = 0;
     sf2000_sdio_resp[2] = 0;
@@ -1561,6 +1569,23 @@ static void sf2000_sdio_complete_cmd(void)
 
     switch (sf2000_sdio_cmd) {
     case 0:
+        break;
+    case 6:
+        if (is_app_cmd) {
+            /*
+             * ACMD6 selects the data bus width. Stock boot issues CMD55 then
+             * CMD6 arg=2 after selecting the card, which means 4-bit mode.
+             */
+            sf2000_sdio_bus_width = (sf2000_sdio_arg & 3u) == 2u ? 4 : 1;
+            sf2000_sdio_resp[0] = 0;
+        } else {
+            /*
+             * Plain CMD6 is SWITCH_FUNC. The current stock path does not use
+             * the 64-byte function-status payload, so keep the command
+             * accepted but report no data transfer until a trace needs it.
+             */
+            sf2000_sdio_resp[0] = 0;
+        }
         break;
     case 2:
         sf2000_sdio_resp[0] = 0x12345678;
@@ -1581,6 +1606,10 @@ static void sf2000_sdio_complete_cmd(void)
         sf2000_sdio_resp[3] = 0x400e0032;
         break;
     case 41:
+        if (!is_app_cmd) {
+            sf2000_sdio_resp[0] = 0x00000900;
+            break;
+        }
         /*
          * ACMD41 OCR response. The model reports ready with broad voltage
          * support because the goal is testing SF2000 firmware behavior rather
@@ -1591,6 +1620,10 @@ static void sf2000_sdio_complete_cmd(void)
         break;
     case 55:
         sf2000_sdio_resp[0] = 0x20000000; /* APP_CMD accepted in response-byte window. */
+        sf2000_sdio_app_cmd = true;
+        break;
+    case 13:
+        sf2000_sdio_resp[0] = 0x00000900; /* Ready for data, transfer state. */
         break;
     case 7:
     case 16:
@@ -1617,11 +1650,19 @@ static void sf2000_sdio_complete_cmd(void)
         break;
     }
 
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: sdio-cmd cmd=%u arg=0x%08x resp=%08x %08x %08x %08x\n",
-                  sf2000_sdio_cmd, sf2000_sdio_arg, sf2000_sdio_resp[0],
-                  sf2000_sdio_resp[1], sf2000_sdio_resp[2],
-                  sf2000_sdio_resp[3]);
+    if (sf2000_sdio_cmd != 55) {
+        sf2000_sdio_app_cmd = false;
+    }
+
+    if (sf2000_trace_sdio()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: sdio-cmd cmd=%u%s arg=0x%08x resp=%08x %08x %08x %08x bus=%u\n",
+                      sf2000_sdio_cmd, is_app_cmd ? " app" : "",
+                      sf2000_sdio_arg, sf2000_sdio_resp[0],
+                      sf2000_sdio_resp[1], sf2000_sdio_resp[2],
+                      sf2000_sdio_resp[3],
+                      sf2000_sdio_bus_width ? sf2000_sdio_bus_width : 1);
+    }
 }
 
 static void sf2000_panel_update_rect(SF2000LCDState *s, uint16_t x, uint16_t y)
