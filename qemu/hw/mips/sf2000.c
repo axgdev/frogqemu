@@ -84,7 +84,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_LCD_HEIGHT      240
 #define SF2000_CHIP_ID_VALUE   0x1512a501
 #define SF2000_HC15XX_CHIP_ID  0x1512
+#define SF2000_UART0_BASE      0x18818300ULL
 #define SF2000_UART1_BASE      0x18818600ULL
+#define SF2000_UART_SIZE       0x00000008ULL
 #define SF2000_UART_RBR_THR    0x00
 #define SF2000_UART_IER        0x01
 #define SF2000_UART_IIR        0x02
@@ -99,6 +101,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_ADC_SAMPLE      200
 #define SF2000_WDT_BASE        0x18818500ULL
 #define SF2000_WDT_SIZE        0x00000100ULL
+#define SF2000_SYSCLK_EXT_BASE 0x18801000ULL
+#define SF2000_SYSCLK_EXT_SIZE 0x00000100ULL
+#define SF2000_SND_DAC_BASE    0x1880b000ULL
+#define SF2000_SND_DAC_SIZE    0x00000100ULL
+#define SF2000_DSC_BOOT_BASE   0x18870000ULL
+#define SF2000_DSC_BOOT_SIZE   0x00000010ULL
 #define SF2000_GE_BASE         0x18806000ULL
 #define SF2000_GE_SIZE         0x00000100ULL
 #define SF2000_GE_CTRL         (SF2000_GE_BASE + 0x00)
@@ -289,10 +297,10 @@ static bool sf2000_sdio_app_cmd;
 static uint8_t sf2000_sdio_bus_width;
 static bool sf2000_sb_timer_irq_masked;
 static BlockBackend *sf2000_sdio_blk;
-static char sf2000_uart_line[256];
-static uint32_t sf2000_uart_line_len;
-static uint8_t sf2000_uart1_ier;
-static bool sf2000_uart1_thri_pending;
+static char sf2000_uart_line[2][256];
+static uint32_t sf2000_uart_line_len[2];
+static uint8_t sf2000_uart_ier[2];
+static bool sf2000_uart_thri_pending[2];
 static uint32_t sf2000_key_mask;
 static unsigned sf2000_key_shift_index;
 static uint32_t sf2000_gpio_l_out;
@@ -693,10 +701,28 @@ static bool sf2000_irq1_enabled(uint32_t mask)
     return false;
 }
 
-static bool sf2000_uart1_irq_pending(void)
+static bool sf2000_uart_decode(hwaddr full_addr, unsigned *index,
+                               unsigned *offset)
 {
-    return sf2000_uart1_thri_pending &&
-           (sf2000_uart1_ier & SF2000_UART_IER_THRI) != 0;
+    if (full_addr >= SF2000_UART0_BASE &&
+        full_addr < SF2000_UART0_BASE + SF2000_UART_SIZE) {
+        *index = 0;
+        *offset = full_addr - SF2000_UART0_BASE;
+        return true;
+    }
+    if (full_addr >= SF2000_UART1_BASE &&
+        full_addr < SF2000_UART1_BASE + SF2000_UART_SIZE) {
+        *index = 1;
+        *offset = full_addr - SF2000_UART1_BASE;
+        return true;
+    }
+    return false;
+}
+
+static bool sf2000_uart_irq_pending(unsigned index)
+{
+    return sf2000_uart_thri_pending[index] &&
+           (sf2000_uart_ier[index] & SF2000_UART_IER_THRI) != 0;
 }
 
 static bool sf2000_gpio_l_vsync_enabled(void)
@@ -855,7 +881,7 @@ static void sf2000_update_irq(void)
     qemu_set_irq(sf2000_eirq3,
                  (sf2000_gpio_l_vsync_pending() &&
                   sf2000_irq1_enabled(SF2000_GPIO_IRQ)) ||
-                 (sf2000_uart1_irq_pending() &&
+                 (sf2000_uart_irq_pending(1) &&
                   sf2000_irq1_enabled(SF2000_UART1_IRQ)) ||
                  (sf2000_sb_timer_pending() && !sf2000_sb_timer_irq_masked) ||
                  (sf2000_sdio_irq_pending &&
@@ -946,15 +972,24 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
      * These are intentionally modelled as hot polling registers. Logging every
      * byte poll makes the firmware trace much harder to mine for new gaps.
      */
-    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
-        (addr == SF2000_UART1_BASE + SF2000_UART_LSR &&
-         g_str_equal(kind, "mmio-read")) ||
+    if ((addr >= SF2000_UART0_BASE &&
+         addr < SF2000_UART0_BASE + SF2000_UART_SIZE) ||
+        (addr >= SF2000_UART1_BASE &&
+         addr < SF2000_UART1_BASE + SF2000_UART_SIZE) ||
         (addr == SF2000_MSYSIO_BASE && g_str_equal(kind, "mmio-read")) ||
         (addr >= SF2000_AVPHY_BASE &&
          addr < SF2000_AVPHY_BASE + SF2000_AVPHY_SIZE) ||
         (addr >= SF2000_GE_BASE && addr < SF2000_GE_BASE + SF2000_GE_SIZE) ||
         (addr >= SF2000_GMA_BASE &&
          addr < SF2000_GMA_BASE + SF2000_GMA_SIZE) ||
+        (addr >= SF2000_ADC_BASE && addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) ||
+        (addr >= SF2000_WDT_BASE && addr < SF2000_WDT_BASE + SF2000_WDT_SIZE) ||
+        (addr >= SF2000_SYSCLK_EXT_BASE &&
+         addr < SF2000_SYSCLK_EXT_BASE + SF2000_SYSCLK_EXT_SIZE) ||
+        (addr >= SF2000_SND_DAC_BASE &&
+         addr < SF2000_SND_DAC_BASE + SF2000_SND_DAC_SIZE) ||
+        (addr >= SF2000_DSC_BOOT_BASE &&
+         addr < SF2000_DSC_BOOT_BASE + SF2000_DSC_BOOT_SIZE) ||
         (addr >= 0x1884c000 && addr < 0x1884c040 &&
          !sf2000_trace_sdio()) ||
         (addr >= SF2000_AUX_BASE && addr < SF2000_AUX_BASE + SF2000_AUX_SIZE &&
@@ -969,8 +1004,8 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
         (addr == SF2000_GPIO_R_IN && g_str_equal(kind, "mmio-read")) ||
         (addr == SF2000_GPIO_R_ISR && g_str_equal(kind, "mmio-read")) ||
         addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2 ||
-        (addr >= SF2000_TIMER_BASE && addr < SF2000_TIMER_BASE +
-         SF2000_TIMER_SIZE && g_str_equal(kind, "mmio-read"))) {
+        (addr >= SF2000_TIMER_BASE &&
+         addr < SF2000_TIMER_BASE + SF2000_TIMER_SIZE)) {
         return;
     }
 
@@ -1303,20 +1338,21 @@ static bool sf2000_wdt_decode(hwaddr full_addr)
            full_addr < SF2000_WDT_BASE + SF2000_WDT_SIZE;
 }
 
-static void sf2000_uart_put(uint8_t ch)
+static void sf2000_uart_put(unsigned index, uint8_t ch)
 {
     if (ch == '\r') {
         return;
     }
     if (ch == '\n') {
-        sf2000_uart_line[sf2000_uart_line_len] = 0;
-        qemu_log_mask(LOG_UNIMP, "sf2000: uart: %s\n", sf2000_uart_line);
-        sf2000_uart_line_len = 0;
+        sf2000_uart_line[index][sf2000_uart_line_len[index]] = 0;
+        qemu_log_mask(LOG_UNIMP, "sf2000: uart: %s\n",
+                      sf2000_uart_line[index]);
+        sf2000_uart_line_len[index] = 0;
         return;
     }
-    if (sf2000_uart_line_len + 1 < sizeof(sf2000_uart_line)) {
-        sf2000_uart_line[sf2000_uart_line_len++] = ch >= 0x20 && ch < 0x7f ?
-                                                   ch : '.';
+    if (sf2000_uart_line_len[index] + 1 < sizeof(sf2000_uart_line[index])) {
+        sf2000_uart_line[index][sf2000_uart_line_len[index]++] =
+            ch >= 0x20 && ch < 0x7f ? ch : '.';
     }
 }
 
@@ -1939,6 +1975,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     uint64_t value = 0;
     unsigned timer_index;
     unsigned timer_offset;
+    unsigned uart_index;
+    unsigned uart_offset;
     unsigned i;
 
     if (full_addr == SF2000_IRQ_STATUS1) {
@@ -1949,7 +1987,7 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         if (gpio_vsync_pending) {
             value |= SF2000_GPIO_IRQ;
         }
-        if (sf2000_uart1_irq_pending()) {
+        if (sf2000_uart_irq_pending(1)) {
             value |= SF2000_UART1_IRQ;
         }
         if (sf2000_sdio_irq_pending) {
@@ -2003,22 +2041,25 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         if (size < 4) {
             value &= (1u << (size * 8)) - 1u;
         }
-    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IER) {
-        value = sf2000_uart1_ier;
-    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IIR) {
+    } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
+               uart_offset == SF2000_UART_IER) {
+        value = sf2000_uart_ier[uart_index];
+    } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
+               uart_offset == SF2000_UART_IIR) {
         /*
          * The HCRTOS 16550 driver reads IIR to clear the interrupt, then
          * treats 0x02 as transmitter-holding-register empty and completes
          * blocked writes. The emulated FIFO drains immediately, so expose a
          * one-shot THRI interrupt whenever THRI is enabled.
          */
-        if (sf2000_uart1_irq_pending()) {
+        if (sf2000_uart_irq_pending(uart_index)) {
             value = SF2000_UART_IIR_THRI;
-            sf2000_uart1_thri_pending = false;
+            sf2000_uart_thri_pending[uart_index] = false;
         } else {
             value = SF2000_UART_IIR_NONE;
         }
-    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_LSR) {
+    } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
+               uart_offset == SF2000_UART_LSR) {
         value = SF2000_UART_LSR_THRE | SF2000_UART_LSR_TEMT;
     } else if (full_addr >= SF2000_ADC_BASE &&
                full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
@@ -2139,6 +2180,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     unsigned timer_offset;
     unsigned adc_index;
     unsigned adc_offset;
+    unsigned uart_index;
+    unsigned uart_offset;
     unsigned i;
 
     for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -2208,10 +2251,11 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         }
     } else if (full_addr == SF2000_IRQ_STATUS1 && (value & SF2000_SDIO_IRQ)) {
         sf2000_sdio_irq_pending = false;
-    } else if (full_addr == SF2000_UART1_BASE + SF2000_UART_IER) {
-        sf2000_uart1_ier = value & 0xff;
-        if (sf2000_uart1_ier & SF2000_UART_IER_THRI) {
-            sf2000_uart1_thri_pending = true;
+    } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
+               uart_offset == SF2000_UART_IER) {
+        sf2000_uart_ier[uart_index] = value & 0xff;
+        if (sf2000_uart_ier[uart_index] & SF2000_UART_IER_THRI) {
+            sf2000_uart_thri_pending[uart_index] = true;
         }
     } else if (full_addr == SF2000_GPIO_L_ISR && (value & SF2000_GPIO_L08)) {
         uint32_t isr = 0;
@@ -2246,10 +2290,11 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     } else if ((full_addr & ~0x80u) == 0x18808304) {
         sf2000_active_gma[(full_addr & 0x80u) ? 1 : 0] = value;
         sf2000_gma_present(value);
-    } else if (full_addr == SF2000_UART1_BASE) {
-        sf2000_uart_put(value & 0xff);
-        if (sf2000_uart1_ier & SF2000_UART_IER_THRI) {
-            sf2000_uart1_thri_pending = true;
+    } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
+               uart_offset == SF2000_UART_RBR_THR) {
+        sf2000_uart_put(uart_index, value & 0xff);
+        if (sf2000_uart_ier[uart_index] & SF2000_UART_IER_THRI) {
+            sf2000_uart_thri_pending[uart_index] = true;
         }
     } else if (full_addr == 0x1882e098) {
         sf2000_sflash_cmd = value & 0xff;
@@ -2587,9 +2632,6 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
     }
 
     if (mode == 0x06 && (d0 & 1)) {
-        qemu_log_mask(LOG_UNIMP,
-                      "sf2000: gma-skip-hidden dmba=0x%08x bitmap=0x%08x d0=%08x d6=%08x\n",
-                      dmba_addr, d7, d0, d6);
         return d6;
     }
 
