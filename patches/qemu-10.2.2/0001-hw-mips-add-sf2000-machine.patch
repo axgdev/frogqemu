@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2834 @@
+@@ -0,0 +1,2856 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -1226,12 +1226,22 @@
 +
 +static uint32_t sf2000_gpio_l_sample(uint32_t value)
 +{
++    CPUState *cs = first_cpu;
 +    unsigned index = sf2000_key_shift_index % SF2000_KEY_COUNT;
 +
 +    if (sf2000_key_mask & BIT(index)) {
 +        value &= ~BIT(SF2000_KEY_DATA_BIT);
 +    } else {
 +        value |= BIT(SF2000_KEY_DATA_BIT);
++    }
++
++    if (g_getenv("SF2000_TRACE_KEYS") && cs) {
++        MIPSCPU *cpu = MIPS_CPU(cs);
++
++        fprintf(stderr,
++                "sf2000: key-sample pc=0x%08x index=%u mask=0x%08x value=0x%08x\n",
++                (uint32_t)cpu->env.active_tc.PC, index, sf2000_key_mask,
++                value);
 +    }
 +
 +    return value;
@@ -1241,6 +1251,8 @@
 +{
 +    bool old_clk = (sf2000_gpio_l_out & BIT(SF2000_KEY_CLK_BIT)) != 0;
 +    bool new_clk = (value & BIT(SF2000_KEY_CLK_BIT)) != 0;
++    uint32_t dir = 0;
++    bool data_is_output;
 +
 +    /*
 +     * The SF2000 local keypad is a 12-bit active-low shift register on L23
@@ -1249,11 +1261,21 @@
 +     * is why keyboard state is not returned as one flat GPIO register: each
 +     * rising clock edge advances the sampled key bit.
 +     */
-+    if (!(value & BIT(SF2000_KEY_DATA_BIT))) {
++    sf2000_mmio_get32(SF2000_GPIO_L_IN + 8, &dir);
++    data_is_output = (dir & BIT(SF2000_KEY_DATA_BIT)) != 0;
++
++    if (data_is_output && !(value & BIT(SF2000_KEY_DATA_BIT))) {
 +        sf2000_key_shift_index = 0;
 +    } else if (!old_clk && new_clk) {
 +        sf2000_key_shift_index =
 +            (sf2000_key_shift_index + 1) % SF2000_KEY_COUNT;
++    }
++
++    if (g_getenv("SF2000_TRACE_KEYS")) {
++        fprintf(stderr,
++                "sf2000: key-clock old=0x%08x new=0x%08x index=%u mask=0x%08x\n",
++                sf2000_gpio_l_out, value, sf2000_key_shift_index,
++                sf2000_key_mask);
 +    }
 +
 +    sf2000_gpio_l_out = value;
