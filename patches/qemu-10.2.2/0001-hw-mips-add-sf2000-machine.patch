@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2550 @@
+@@ -0,0 +1,2549 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -524,16 +524,15 @@
 +
 +    /*
 +     * The stock ASD is stored with a 0x200-byte pack header. The bootloader
-+     * copies file offset N to physical N. The nearest public symbol is
-+     * 0x80355770, but the prologue begins one instruction earlier at
-+     * 0x8035576c, which maps to physical/file offset 0x0035596c.
++     * copies file offset N to physical N. The public symbol is 0x80355770,
++     * which maps to physical/file offset 0x00355770.
 +     */
-+    cpu_physical_memory_read(0x0035596c, current, sizeof(current));
-+    if (current[0] == 0x40 && current[1] == 0xfe &&
++    cpu_physical_memory_read(0x00355770, current, sizeof(current));
++    if (current[0] == 0xe0 && current[1] == 0xfe &&
 +        current[2] == 0xbd && current[3] == 0x27 &&
-+        current[4] == 0xb4 && current[5] == 0xbb &&
-+        current[6] == 0xa5 && current[7] == 0x24) {
-+        cpu_physical_memory_write(0x0035596c, patch, sizeof(patch));
++        current[4] == 0x98 && current[5] == 0xa0 &&
++        current[6] == 0x84 && current[7] == 0x27) {
++        cpu_physical_memory_write(0x00355770, patch, sizeof(patch));
 +        queue_tb_flush(cs);
 +        sf2000_stock_security_patched = true;
 +        warn_report("sf2000: patched stock security_check for diagnostic boot");
