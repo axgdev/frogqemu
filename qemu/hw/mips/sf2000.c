@@ -130,6 +130,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_UART1_IRQ       (1u << SF2000_UART1_IRQ_BIT)
 #define SF2000_SDIO_IRQ_BIT    10
 #define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
+#define SF2000_AUX_BASE        0x1880f000ULL
+#define SF2000_AUX_SIZE        0x00000100ULL
 #define SF2000_GPIO_IRQ        BIT(0)
 #define SF2000_EIRQ3_LINE      3
 #define SF2000_GPIO_L_IER      0x18800044ULL
@@ -888,6 +890,56 @@ static bool sf2000_trace_sdio(void)
     return trace != 0;
 }
 
+static bool sf2000_trace_sysio(void)
+{
+    static int trace = -1;
+
+    if (trace < 0) {
+        const char *env = g_getenv("SF2000_TRACE_SYSIO");
+
+        trace = env && env[0] && g_strcmp0(env, "0") != 0;
+    }
+    return trace != 0;
+}
+
+static bool sf2000_trace_aux(void)
+{
+    static int trace = -1;
+
+    if (trace < 0) {
+        const char *env = g_getenv("SF2000_TRACE_AUX");
+
+        trace = env && env[0] && g_strcmp0(env, "0") != 0;
+    }
+    return trace != 0;
+}
+
+static bool sf2000_trace_sflash(void)
+{
+    static int trace = -1;
+
+    if (trace < 0) {
+        const char *env = g_getenv("SF2000_TRACE_SFLASH");
+
+        trace = env && env[0] && g_strcmp0(env, "0") != 0;
+    }
+    return trace != 0;
+}
+
+static bool sf2000_sysio_quiet_addr(hwaddr addr)
+{
+    /*
+     * Clock, reset, and pinmux setup registers are noisy during stock display
+     * bring-up but are already backed by the generic read/write register store.
+     * Keep them visible only when explicitly researching the SYSIO block.
+     */
+    return addr == 0x18800060 || addr == 0x18800064 ||
+           addr == 0x18800078 || addr == 0x1880007c ||
+           addr == 0x18800080 || addr == 0x18800084 ||
+           addr == 0x18800094 ||
+           (addr >= 0x188004a0 && addr <= 0x1880051c);
+}
+
 static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
                             unsigned size)
 {
@@ -906,6 +958,9 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
          addr < SF2000_GMA_BASE + SF2000_GMA_SIZE) ||
         (addr >= 0x1884c000 && addr < 0x1884c040 &&
          !sf2000_trace_sdio()) ||
+        (addr >= SF2000_AUX_BASE && addr < SF2000_AUX_BASE + SF2000_AUX_SIZE &&
+         !sf2000_trace_aux()) ||
+        (sf2000_sysio_quiet_addr(addr) && !sf2000_trace_sysio()) ||
         (addr >= 0x1882e098 && addr < 0x1882e0a4) ||
         addr == SF2000_GPIO_L_OUT || addr == 0x18800354 ||
         addr == 0x18800058 || addr == 0x18800358 ||
@@ -2188,8 +2243,10 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         }
     } else if (full_addr == 0x1882e098) {
         sf2000_sflash_cmd = value & 0xff;
-        qemu_log_mask(LOG_UNIMP, "sf2000: sflash-cmd cmd=0x%02x\n",
-                      sf2000_sflash_cmd);
+        if (sf2000_trace_sflash()) {
+            qemu_log_mask(LOG_UNIMP, "sf2000: sflash-cmd cmd=0x%02x\n",
+                          sf2000_sflash_cmd);
+        }
     } else if (full_addr == 0x1884c004) {
         sf2000_sdio_arg = value;
     } else if (full_addr == 0x1884c002) {
@@ -2331,6 +2388,14 @@ static uint64_t sf2000_sflash_direct_read(void *opaque, hwaddr addr,
         case 0x9f: /* Read JEDEC ID. */
             byte = jedec_id[(addr + i) % ARRAY_SIZE(jedec_id)];
             break;
+        case 0xab:
+            /*
+             * Release from deep power-down / read electronic signature. SPI
+             * NOR parts return the device ID after three dummy bytes; the
+             * stock bootloader reads a 32-bit little-endian word from offset 0.
+             */
+            byte = ((addr + i) & 3u) == 3u ? 0x13 : 0x00;
+            break;
         default:
             if (!sf2000_sflash_security_byte(addr + i, &byte)) {
                 byte = sf2000_bootrom_bytes[(addr + i) % SF2000_BOOT_SIZE];
@@ -2354,20 +2419,24 @@ static uint64_t sf2000_sflash_direct_read(void *opaque, hwaddr addr,
         }
     }
 
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: sflash-read cmd=0x%02x off=0x%08" HWADDR_PRIx
-                  " size=%u value=0x%08" PRIx64 "\n",
-                  sf2000_sflash_cmd, addr, size, value);
+    if (sf2000_trace_sflash()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: sflash-read cmd=0x%02x off=0x%08" HWADDR_PRIx
+                      " size=%u value=0x%08" PRIx64 "\n",
+                      sf2000_sflash_cmd, addr, size, value);
+    }
     return value;
 }
 
 static void sf2000_sflash_direct_write(void *opaque, hwaddr addr,
                                        uint64_t value, unsigned size)
 {
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: sflash-write off=0x%08" HWADDR_PRIx
-                  " size=%u value=0x%08" PRIx64 "\n",
-                  addr, size, value);
+    if (sf2000_trace_sflash()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: sflash-write off=0x%08" HWADDR_PRIx
+                      " size=%u value=0x%08" PRIx64 "\n",
+                      addr, size, value);
+    }
 }
 
 static const MemoryRegionOps sf2000_sflash_direct_ops = {
