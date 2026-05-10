@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2416 @@
+@@ -0,0 +1,2506 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -291,6 +291,7 @@
 +static unsigned sf2000_ge_queue_dump_count;
 +static const char *sf2000_last_pc_landmark;
 +static unsigned sf2000_pc_sample_count;
++static uint32_t sf2000_last_call_pc;
 +
 +typedef struct SF2000KeyMap {
 +    QKeyCode qcode;
@@ -343,6 +344,16 @@
 +     */
 +    { 0x802a8700, 0x802a876c, "file_open" },
 +    { 0x802a8800, 0x802a8850, "file_read" },
++    { 0x802ad1d8, 0x802ad240, "fopen" },
++    { 0x802ad34c, 0x802ad3c0, "fread" },
++    { 0x802acbf4, 0x802acc40, "fclose" },
++    { 0x80309264, 0x80309320, "i_start_thread" },
++    { 0x80309324, 0x80309420, "os_create_thread" },
++    { 0x8030962c, 0x80309830, "make_ready" },
++    { 0x80309aa4, 0x80309ac0, "tds_main_dispatch" },
++    { 0x80309ac0, 0x80309d64, "create_main_task" },
++    { 0x80346248, 0x803462a4, "create_run_task" },
++    { 0x803462f0, 0x80346324, "run_task" },
 +    { 0x80346324, 0x8034c248, "app_main" },
 +    { 0x8034ce14, 0x8034cf24, "run_blit_from_file" },
 +    { 0x8034d984, 0x8034de50, "run_menu_readdir_user" },
@@ -350,7 +361,85 @@
 +    { 0x8034f854, 0x80354f74, "run_menu" },
 +    { 0x8035a794, 0x8035f97c, "run_game" },
 +    { 0x8035f97c, 0x80365c34, "unwqw_decompress" },
++    { 0x80355770, 0x80355b50, "security_check" },
 +};
++
++static hwaddr sf2000_guest_phys_addr(uint32_t vaddr)
++{
++    if (vaddr >= 0x80000000U && vaddr < 0xc0000000U) {
++        return vaddr & 0x1fffffffU;
++    }
++    return vaddr;
++}
++
++static void sf2000_guest_read_string(uint32_t vaddr, char *buf, size_t len)
++{
++    hwaddr addr = sf2000_guest_phys_addr(vaddr);
++    MemTxResult res;
++    size_t i;
++
++    if (!len) {
++        return;
++    }
++
++    for (i = 0; i + 1 < len; i++) {
++        uint8_t ch = address_space_ldub(&address_space_memory, addr + i,
++                                        MEMTXATTRS_UNSPECIFIED, &res);
++        if (res != MEMTX_OK || ch == 0) {
++            break;
++        }
++        if (ch < 0x20 || ch > 0x7e) {
++            buf[i] = '.';
++        } else {
++            buf[i] = ch;
++        }
++    }
++    buf[i] = 0;
++}
++
++static void sf2000_trace_fw_call(uint32_t pc, MIPSCPU *cpu)
++{
++    bool stderr_trace = g_getenv("SF2000_TRACE_PC") != NULL;
++    char arg0[96];
++    char arg1[32];
++    uint32_t a0 = (uint32_t)cpu->env.active_tc.gpr[4];
++    uint32_t a1 = (uint32_t)cpu->env.active_tc.gpr[5];
++    uint32_t a2 = (uint32_t)cpu->env.active_tc.gpr[6];
++    uint32_t a3 = (uint32_t)cpu->env.active_tc.gpr[7];
++
++    if (!stderr_trace || sf2000_last_call_pc == pc) {
++        return;
++    }
++
++    switch (pc) {
++    case 0x802ad1d8: /* fopen(path, mode) */
++        sf2000_guest_read_string(a0, arg0, sizeof(arg0));
++        sf2000_guest_read_string(a1, arg1, sizeof(arg1));
++        fprintf(stderr, "sf2000: fopen path='%s' mode='%s' ra=0x%08x\n",
++                arg0, arg1, (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    case 0x802ad34c: /* fread(ptr, size, nmemb, stream) */
++        fprintf(stderr,
++                "sf2000: fread dst=0x%08x size=%u count=%u stream=0x%08x ra=0x%08x\n",
++                a0, a1, a2, a3, (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    case 0x802acbf4: /* fclose(stream) */
++        fprintf(stderr, "sf2000: fclose stream=0x%08x ra=0x%08x\n",
++                a0, (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    case 0x80355770:
++        fprintf(stderr, "sf2000: security_check arg=0x%08x ra=0x%08x\n",
++                a0, (uint32_t)cpu->env.active_tc.gpr[31]);
++        sf2000_last_call_pc = pc;
++        break;
++    default:
++        sf2000_last_call_pc = 0;
++        break;
++    }
++}
 +
 +static void sf2000_trace_pc_landmark(void)
 +{
@@ -366,6 +455,7 @@
 +
 +    cpu = MIPS_CPU(cs);
 +    pc = (uint32_t)cpu->env.active_tc.PC;
++    sf2000_trace_fw_call(pc, cpu);
 +    for (i = 0; i < ARRAY_SIZE(sf2000_pc_landmarks); i++) {
 +        const SF2000PCLandmark *landmark = &sf2000_pc_landmarks[i];
 +
