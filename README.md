@@ -1,8 +1,17 @@
 # SF2000 QEMU Bring-Up
 
+<!-- SPDX-License-Identifier: MIT -->
+
 This project carries a small, patch-based QEMU board model for the Data Frog
 SF2000 / HC15xx family. The goal is fast firmware bring-up and hardware
 contract discovery, not a complete emulator yet.
+
+## License
+
+This repository is multi-licensed. Build files, documentation, and host helper
+tools are MIT licensed. QEMU machine-model patches are GPL-2.0-or-later because
+they are built into QEMU, whose emulator is GPLv2. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The baseline is QEMU 10.2.2. It is a conservative stable baseline with modern
 MIPS TCG, VNC, and GDB stub support, without chasing brand-new 11.x churn while

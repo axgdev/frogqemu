@@ -1,0 +1,15 @@
+SF2000 QEMU Bring-Up Licensing
+
+SPDX-License-Identifier: MIT
+
+This repository is intentionally multi-licensed by component:
+
+- Repository-owned build files, documentation, and host helper tools are
+  licensed under the MIT License. See `LICENSES/MIT.txt`.
+- QEMU machine-model patches under `patches/qemu-*` are licensed under
+  GPL-2.0-or-later because they are QEMU-derived device-model code that is
+  compiled into the GPL-licensed QEMU emulator. See `LICENSES/GPL-2.0-or-later.txt`.
+
+Every source file should carry an SPDX identifier matching its component.
+Third-party software and firmware inputs are not relicensed by this repository;
+see `THIRD_PARTY_NOTICES.md`.

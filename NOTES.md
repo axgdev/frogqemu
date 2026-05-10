@@ -1,5 +1,7 @@
 # Bring-Up Notes
 
+<!-- SPDX-License-Identifier: MIT -->
+
 ## Why QEMU
 
 QEMU gives the best path to running stock firmware because it already has MIPS

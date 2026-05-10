@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 QEMU_VERSION := 10.2.2
 QEMU_TARBALL := qemu-$(QEMU_VERSION).tar.xz
 QEMU_URL := https://download.qemu.org/$(QEMU_TARBALL)
