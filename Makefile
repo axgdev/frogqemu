@@ -396,7 +396,7 @@ smoke-stock-asd: build
 		-d guest_errors,unimp -D build/logs/smoke-stock-asd.log \
 		> build/logs/smoke-stock-asd.console 2>&1 || test $$? -eq 124
 	grep -q 'sf2000: loaded ASD' build/logs/smoke-stock-asd.console
-	grep -q 'addr=0x18800002.*value=0x00001512' build/logs/smoke-stock-asd.log
+	grep -q 'uart: adc_attach' build/logs/smoke-stock-asd.log
 
 smoke-stock-fatfs: build
 	mkdir -p build/logs
