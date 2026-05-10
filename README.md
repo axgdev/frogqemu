@@ -146,8 +146,8 @@ This directory is present in the repository, but its contents are ignored by
 git. Put the firmware blobs there with these names:
 
 ```text
-firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 firmware/bisrv_08_03.asd
 firmware/bisrv_gb300_v2.asd
 ```
@@ -158,11 +158,15 @@ The vanilla VNC target only needs the bugfixed bootloader in
 If you keep the files elsewhere, use a local untracked `config.mk`:
 
 ```make
-FIRMWARE_BUGFIX := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
-FIRMWARE := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+FIRMWARE := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+FIRMWARE_ORIGINAL := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 ASD := /home/me/firmware/bisrv_08_03.asd
 GB300_ASD := /home/me/firmware/bisrv_gb300_v2.asd
 ```
+
+`FIRMWARE` defaults to the vendor bugfixed XMC image. Use
+`FIRMWARE_ORIGINAL` only when intentionally comparing the original bootloader
+bug or FAT directory behavior.
 
 Run the current direct stock ASD bring-up smoke with:
 

@@ -138,6 +138,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_SYSCLK_EXT_SIZE 0x00000100ULL
 #define SF2000_SND_DAC_BASE    0x1880b000ULL
 #define SF2000_SND_DAC_SIZE    0x00000100ULL
+#define SF2000_USB0_BASE       0x18844000ULL
+#define SF2000_USB1_BASE       0x18850000ULL
+#define SF2000_USB_SIZE        0x00001000ULL
+#define SF2000_USB_REG_COUNT   (SF2000_USB_SIZE / 4)
 #define SF2000_DSC_BOOT_BASE   0x18870000ULL
 #define SF2000_DSC_BOOT_SIZE   0x00000010ULL
 #define SF2000_GE_BASE         0x18806000ULL
@@ -179,6 +183,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_IRC_IRQ         (1u << SF2000_IRC_IRQ_BIT)
 #define SF2000_SDIO_IRQ_BIT    10
 #define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
+#define SF2000_USB1_DMA_IRQ2   BIT(18)
+#define SF2000_USB1_MC_IRQ2    BIT(19)
+#define SF2000_USB0_DMA_IRQ2   BIT(20)
+#define SF2000_USB0_MC_IRQ2    BIT(21)
 #define SF2000_AUX_BASE        0x1880f000ULL
 #define SF2000_AUX_SIZE        0x00000100ULL
 #define SF2000_GPIO_IRQ        BIT(0)
@@ -360,6 +368,7 @@ static uint8_t sf2000_i2c_isr1[2];
 static uint8_t sf2000_i2c_data[2];
 static uint32_t sf2000_pwm_clk_ctrl;
 static SF2000PWMChannel sf2000_pwm_channel[SF2000_PWM_CHANNELS];
+static uint32_t sf2000_usb_regs[2][SF2000_USB_REG_COUNT];
 static uint8_t sf2000_irc_fifo_cfg;
 static uint8_t sf2000_irc_ier;
 static uint8_t sf2000_irc_isr;
@@ -824,6 +833,79 @@ static bool sf2000_i2c_irq_pending(unsigned index)
 {
     return ((sf2000_i2c_isr[index] & sf2000_i2c_ier[index]) != 0) ||
            ((sf2000_i2c_isr1[index] & sf2000_i2c_ier1[index]) != 0);
+}
+
+static bool sf2000_usb_decode(hwaddr full_addr, unsigned *index,
+                              unsigned *offset)
+{
+    if (full_addr >= SF2000_USB0_BASE &&
+        full_addr < SF2000_USB0_BASE + SF2000_USB_SIZE) {
+        *index = 0;
+        *offset = full_addr - SF2000_USB0_BASE;
+        return true;
+    }
+    if (full_addr >= SF2000_USB1_BASE &&
+        full_addr < SF2000_USB1_BASE + SF2000_USB_SIZE) {
+        *index = 1;
+        *offset = full_addr - SF2000_USB1_BASE;
+        return true;
+    }
+    return false;
+}
+
+static uint64_t sf2000_usb_read(hwaddr full_addr, unsigned size)
+{
+    unsigned index;
+    unsigned offset;
+    uint32_t value;
+
+    if (!sf2000_usb_decode(full_addr, &index, &offset)) {
+        return 0;
+    }
+
+    value = sf2000_usb_regs[index][offset >> 2];
+    /*
+     * The HC15xx DTS exposes two MUSB-like host/peripheral controller windows.
+     * This is an idle shell: no cable/device is attached, endpoint interrupt
+     * state is clear, and the session/connect status reads as disconnected.
+     */
+    switch (offset) {
+    case 0x00: /* FAddr/Power byte lane. */
+    case 0x02: /* IntrTx */
+    case 0x04: /* IntrRx */
+    case 0x06: /* IntrTxE */
+    case 0x08: /* IntrRxE */
+    case 0x0a: /* IntrUSB */
+    case 0x0b: /* IntrUSBE */
+    case 0x60: /* DevCtl */
+        value = 0;
+        break;
+    default:
+        break;
+    }
+
+    value >>= ((full_addr & 3u) * 8u);
+    if (size < 4) {
+        value &= (1u << (size * 8)) - 1u;
+    }
+    return value;
+}
+
+static void sf2000_usb_write(hwaddr full_addr, uint64_t value, unsigned size)
+{
+    unsigned index;
+    unsigned offset;
+    uint32_t old;
+    uint32_t mask = size >= 4 ? 0xffffffffu : ((1u << (size * 8)) - 1u);
+    unsigned shift = (full_addr & 3u) * 8u;
+
+    if (!sf2000_usb_decode(full_addr, &index, &offset)) {
+        return;
+    }
+
+    old = sf2000_usb_regs[index][offset >> 2];
+    sf2000_usb_regs[index][offset >> 2] =
+        (old & ~(mask << shift)) | (((uint32_t)value & mask) << shift);
 }
 
 static bool sf2000_pwm_decode(hwaddr full_addr, unsigned *channel,
@@ -2440,6 +2522,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     unsigned uart_index;
     unsigned uart_offset;
     unsigned i2c_index;
+    unsigned usb_index;
+    unsigned usb_offset;
     unsigned pwm_channel;
     unsigned pwm_offset;
     unsigned irc_offset;
@@ -2541,6 +2625,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         value = SF2000_UART_LSR_THRE | SF2000_UART_LSR_TEMT;
     } else if (sf2000_i2c_decode(full_addr, &i2c_index, &uart_offset)) {
         value = sf2000_i2c_read(full_addr, size);
+    } else if (sf2000_usb_decode(full_addr, &usb_index, &usb_offset)) {
+        value = sf2000_usb_read(full_addr, size);
     } else if (sf2000_pwm_decode(full_addr, &pwm_channel, &pwm_offset)) {
         uint32_t pwm_value = 0;
 
@@ -2674,6 +2760,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     unsigned uart_offset;
     unsigned i2c_index;
     unsigned i2c_offset;
+    unsigned usb_index;
+    unsigned usb_offset;
     unsigned pwm_channel;
     unsigned pwm_offset;
     unsigned irc_offset;
@@ -2793,6 +2881,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         }
     } else if (sf2000_i2c_decode(full_addr, &i2c_index, &i2c_offset)) {
         sf2000_i2c_write(full_addr, value);
+    } else if (sf2000_usb_decode(full_addr, &usb_index, &usb_offset)) {
+        sf2000_usb_write(full_addr, value, size);
     } else if (sf2000_pwm_decode(full_addr, &pwm_channel, &pwm_offset)) {
         sf2000_pwm_write(full_addr);
     } else if (sf2000_irc_decode(full_addr, &irc_offset)) {

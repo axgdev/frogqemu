@@ -27,8 +27,9 @@ VANILLA_DIR := build/vanilla-os
 VANILLA_SD_IMAGE := build/sf2000-vanilla.sd.img
 
 FIRMWARE_DIR ?= firmware
-FIRMWARE ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit.bin
 FIRMWARE_BUGFIX ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+FIRMWARE_ORIGINAL ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit.bin
+FIRMWARE ?= $(FIRMWARE_BUGFIX)
 ASD ?= $(FIRMWARE_DIR)/bisrv_08_03.asd
 GB300_ASD ?= /root/host-frogdev/universal/sf2000_gb300_multicore_private/bisrv_gb300_v2.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
@@ -103,13 +104,14 @@ build-info:
 	@printf 'ccache: %s\n' '$(if $(QEMU_USE_CCACHE),$(if $(CCACHE_BIN),$(CCACHE_BIN),ccache),disabled)'
 	@printf 'firmware: %s\n' '$(FIRMWARE)'
 	@printf 'bugfix firmware: %s\n' '$(FIRMWARE_BUGFIX)'
+	@printf 'original firmware: %s\n' '$(FIRMWARE_ORIGINAL)'
 	@printf 'asd: %s\n' '$(ASD)'
 	@printf 'gb300 asd: %s\n' '$(GB300_ASD)'
 
 check-firmware:
 	@test -f '$(FIRMWARE)' || { \
 		printf 'missing FIRMWARE: %s\n' '$(FIRMWARE)' >&2; \
-		printf 'copy it into firmware/ or set it with: make <target> FIRMWARE=/path/to/SF2000_XMC_XM25QH40B_4mbit.bin\n' >&2; \
+		printf 'copy the bugfixed XMC image into firmware/ or set it with: make <target> FIRMWARE=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin\n' >&2; \
 		exit 1; \
 	}
 
@@ -341,7 +343,7 @@ smoke-stock-bootloader: build
 
 smoke-stock-full: build $(STOCK_SD_IMAGE)
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
 		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full.log \
@@ -378,7 +380,7 @@ smoke-stock-full-vanilla: build $(VANILLA_SD_IMAGE)
 
 smoke-stock-full-fat16: build $(STOCK_SD_IMAGE_FAT16)
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) \
+	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
 		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE_FAT16),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full-fat16.log \

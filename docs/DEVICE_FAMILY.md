@@ -105,6 +105,18 @@ Current evidence suggests:
   The SoC can plausibly support USB controllers if the board exposes the pins,
   supplies VBUS power, and enables the host/HID stack. For retail SF2000, board
   wiring and power are still the gating unknowns.
+- HCRTOS USB HID documentation says the stack supports host and gadget HID
+  modes. Host HID is documented for keyboard and mouse, with input nodes such
+  as `/dev/input/kbd0` and `/dev/input/mouse0`. Gadget HID can expose the
+  device to a PC as keyboard and mouse through `/dev/hidg0` and `/dev/hidg1`.
+  Link libraries in the SDK also include gadget serial, mass-storage, NCM, and
+  HID pieces, so USB serial or PC-facing network-style experiments are plausible
+  software projects if the physical port can run in peripheral mode.
+- USB flash storage is the most plausible host-mode experiment because stock
+  firmware already logs USB mass-storage attach/detach/LUN paths. USB Wi-Fi is
+  a larger project: it needs a supported USB host controller path, a Wi-Fi
+  chipset driver, network stack integration, power budget validation, and a
+  user-facing configuration story.
 
 The immediate emulator goal is not to make every board boot by special casing
 firmware quirks. It is to make common SoC behavior accurate, expose board
