@@ -2,3 +2,5 @@
 build/
 *.log
 config.mk
+firmware/*
+!firmware/.gitkeep

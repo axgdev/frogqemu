@@ -125,32 +125,30 @@ make run-vnc VNC=0.0.0.0:1 SD_IMAGE=/path/to/sd.img
 
 Connect to `vnc://host:5901`.
 
-The default firmware path is:
+The default firmware directory is:
 
 ```sh
-/root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+firmware/
 ```
 
-That path is only correct on the original development machine. On Fedora,
-either keep a local `config.mk` with your paths or pass them on the command
-line. The vanilla VNC target needs the bugfixed bootloader:
+This directory is present in the repository, but its contents are ignored by
+git. Put the firmware blobs there with these names:
 
-```sh
-make run-vnc-vanilla FIRMWARE_BUGFIX=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+```text
+firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+firmware/bisrv_08_03.asd
 ```
 
-A local untracked `config.mk` is the easiest repeatable setup:
+The vanilla VNC target only needs the bugfixed bootloader in
+`firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin`.
+
+If you keep the files elsewhere, use a local untracked `config.mk`:
 
 ```make
 FIRMWARE_BUGFIX := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
 FIRMWARE := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 ASD := /home/me/firmware/bisrv_08_03.asd
-```
-
-The stock ASD path defaults to:
-
-```sh
-/root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
 ```
 
 Run the current direct stock ASD bring-up smoke with:

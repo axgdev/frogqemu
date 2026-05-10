@@ -25,9 +25,10 @@ VANILLA_ZIP := build/downloads/DATAFROG-SF2000-08.03-OS-Files-Only-VANILLA.zip
 VANILLA_DIR := build/vanilla-os
 VANILLA_SD_IMAGE := build/sf2000-vanilla.sd.img
 
-FIRMWARE ?= /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
-FIRMWARE_BUGFIX ?= /root/host-frogdev/universal/orig_firmware/UpdateFirmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
-ASD ?= /root/host-frogdev/universal/orig_firmware/bisrv_08_03.asd
+FIRMWARE_DIR ?= firmware
+FIRMWARE ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit.bin
+FIRMWARE_BUGFIX ?= $(FIRMWARE_DIR)/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+ASD ?= $(FIRMWARE_DIR)/bisrv_08_03.asd
 GDB ?= /opt/gdb-mips-toolchain/bin/mipsel-mti-elf-gdb
 VNC ?= 127.0.0.1:1
 LOG ?= build/logs/sf2000.log
@@ -102,21 +103,21 @@ build-info:
 check-firmware:
 	@test -f '$(FIRMWARE)' || { \
 		printf 'missing FIRMWARE: %s\n' '$(FIRMWARE)' >&2; \
-		printf 'set it with: make <target> FIRMWARE=/path/to/SF2000_XMC_XM25QH40B_4mbit.bin\n' >&2; \
+		printf 'copy it into firmware/ or set it with: make <target> FIRMWARE=/path/to/SF2000_XMC_XM25QH40B_4mbit.bin\n' >&2; \
 		exit 1; \
 	}
 
 check-bugfix-firmware:
 	@test -f '$(FIRMWARE_BUGFIX)' || { \
 		printf 'missing FIRMWARE_BUGFIX: %s\n' '$(FIRMWARE_BUGFIX)' >&2; \
-		printf 'set it with: make <target> FIRMWARE_BUGFIX=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin\n' >&2; \
+		printf 'copy it into firmware/ or set it with: make <target> FIRMWARE_BUGFIX=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin\n' >&2; \
 		exit 1; \
 	}
 
 check-asd:
 	@test -f '$(ASD)' || { \
 		printf 'missing ASD: %s\n' '$(ASD)' >&2; \
-		printf 'set it with: make <target> ASD=/path/to/bisrv_08_03.asd\n' >&2; \
+		printf 'copy it into firmware/ or set it with: make <target> ASD=/path/to/bisrv_08_03.asd\n' >&2; \
 		exit 1; \
 	}
 
