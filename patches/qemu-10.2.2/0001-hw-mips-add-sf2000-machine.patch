@@ -24,7 +24,7 @@
  if 'CONFIG_TCG' in config_all_accel
 --- a/hw/mips/sf2000.c
 +++ b/hw/mips/sf2000.c
-@@ -0,0 +1,2118 @@
+@@ -0,0 +1,2140 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Copyright (c) 2026 UniFrog contributors
@@ -243,6 +243,7 @@
 +static int64_t sf2000_next_tick_ns;
 +static uint32_t sf2000_adc_ctrl[4];
 +static uint8_t sf2000_bootrom_bytes[SF2000_BOOT_SIZE];
++static QEMUTimer *sf2000_irq_poll_timer;
 +static bool sf2000_bootrom_ram_entry;
 +static uint8_t sf2000_sflash_cmd;
 +static uint32_t sf2000_sdio_arg;
@@ -426,6 +427,20 @@
 +                  sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
 +}
 +
++static void sf2000_irq_poll_timer_cb(void *opaque)
++{
++    /*
++     * The stock FreeRTOS port eventually idles in a tight branch loop and
++     * expects the south-bridge timer interrupt to arrive without any MMIO
++     * activity. Re-evaluate the level periodically so QEMU can assert EIRQ3
++     * after virtual time advances instead of only during register accesses.
++     */
++    sf2000_update_irq();
++    timer_mod(sf2000_irq_poll_timer,
++              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++              NANOSECONDS_PER_SECOND / 1000);
++}
++
 +static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
 +                            unsigned size)
 +{
@@ -435,7 +450,9 @@
 +     */
 +    if ((addr == SF2000_UART1_BASE && g_str_equal(kind, "mmio-write")) ||
 +        addr == 0x1884c001 || addr == 0x1884c00b || addr == 0x1884c030 ||
-+        addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2) {
++        addr == SF2000_IRQ_STATUS1 || addr == SF2000_IRQ_STATUS2 ||
++        (addr >= SF2000_TIMER_BASE && addr < SF2000_TIMER_BASE +
++         SF2000_TIMER_SIZE && g_str_equal(kind, "mmio-read"))) {
 +        return;
 +    }
 +
@@ -2081,6 +2098,11 @@
 +    cpu_mips_irq_init_cpu(cpu);
 +    sf2000_eirq3 = cpu->env.irq[SF2000_EIRQ3_LINE];
 +    sf2000_timer_ack();
++    sf2000_irq_poll_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
++                                         sf2000_irq_poll_timer_cb, NULL);
++    timer_mod(sf2000_irq_poll_timer,
++              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++              NANOSECONDS_PER_SECOND / 1000);
 +    cpu_mips_clock_init(cpu);
 +    cpu->env.CP0_IntCtl = 0;
 +    qemu_register_reset(sf2000_cpu_reset, cpu);
