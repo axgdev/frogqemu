@@ -343,7 +343,7 @@ smoke-stock-bootloader: build
 
 smoke-stock-full: build $(STOCK_SD_IMAGE)
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
+	SF2000_TRACE_GMA=1 timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
 		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full.log \
@@ -354,7 +354,7 @@ smoke-stock-full: build $(STOCK_SD_IMAGE)
 
 smoke-stock-full-bugfix: build $(STOCK_SD_IMAGE)
 	mkdir -p build/logs
-	timeout 60s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+	SF2000_TRACE_GMA=1 timeout 60s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
 		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full-bugfix.log \
@@ -367,7 +367,7 @@ smoke-stock-full-bugfix: build $(STOCK_SD_IMAGE)
 
 smoke-stock-full-vanilla: build $(VANILLA_SD_IMAGE)
 	mkdir -p build/logs
-	timeout 150s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
+	SF2000_TRACE_GMA=1 timeout 150s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
 		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full-vanilla.log \
@@ -380,7 +380,7 @@ smoke-stock-full-vanilla: build $(VANILLA_SD_IMAGE)
 
 smoke-stock-full-fat16: build $(STOCK_SD_IMAGE_FAT16)
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
+	SF2000_TRACE_GMA=1 timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_ORIGINAL) \
 		-drive if=none,id=sd0,file=$(STOCK_SD_IMAGE_FAT16),format=raw \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-full-fat16.log \
@@ -409,7 +409,7 @@ smoke-stock-fatfs: build
 
 smoke-stock-display: build
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
+	SF2000_TRACE_GMA=1 timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-stock-display.log \
 		> build/logs/smoke-stock-display.console 2>&1 || test $$? -eq 124
@@ -437,7 +437,7 @@ smoke-gb300-fatfs: build check-gb300-asd
 
 smoke-gb300-display: build check-gb300-asd
 	mkdir -p build/logs
-	timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) \
+	SF2000_TRACE_GMA=1 timeout 45s $(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(GB300_ASD) \
 		-display none -serial none -monitor none \
 		-d guest_errors,unimp -D build/logs/smoke-gb300-display.log \
 		> build/logs/smoke-gb300-display.console 2>&1 || test $$? -eq 124

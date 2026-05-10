@@ -236,7 +236,7 @@ static const SF2000RegDefault sf2000_reg_defaults[] = {
     { 0x18800058, 0x140004ff }, { 0x1880005c, 0x00000000 },
     { 0x18800060, 0x00000f88 },
     { 0x18800064, 0x0bc04040 }, { 0x18800068, 0x02000000 },
-    { 0x18800070, 0x80091717 }, { 0x18800074, 0x00000700 },
+    { 0x18800070, 0x80011717 }, { 0x18800074, 0x00000700 },
     { 0x18800078, 0x00083700 }, { 0x1880007c, 0x000c00c0 },
     { 0x18800080, 0x000023c0 }, { 0x18800084, 0xa00b4000 },
     { 0x18800094, 0x000d0000 }, { 0x188000a4, 0x00002419 },
@@ -249,7 +249,7 @@ static const SF2000RegDefault sf2000_reg_defaults[] = {
     { 0x18800348, 0xffff8183 }, { 0x18800350, 0x00000083 },
     { 0x18800354, 0x00080283 }, { 0x18800358, 0x0008feff },
     { 0x18800380, 0x812b0900 }, { 0x18800384, 0x02000040 },
-    { 0x18800388, 0x0000005e }, { 0x188003cc, 0x00005555 },
+    { 0x18800388, 0x0000005f }, { 0x188003cc, 0x00005555 },
     { 0x18800470, 0x0021001a }, { 0x18800478, 0x011c000d },
     { 0x18800480, 0x0022001a }, { 0x188004a0, 0x06060000 },
     { 0x188004a4, 0x06060606 }, { 0x188004a8, 0x01060600 },
@@ -328,6 +328,10 @@ struct SF2000LCDState {
     uint32_t panel_cmd_count;
     uint32_t panel_pixel_count;
     uint32_t panel_pixels[SF2000_LCD_WIDTH * SF2000_LCD_HEIGHT];
+    uint8_t gma_linebuf[8192];
+    uint8_t gma_palette[1024];
+    uint32_t gma_palette_addr;
+    bool gma_palette_valid;
 };
 
 static SF2000LCDState *sf2000_lcd;
@@ -1098,24 +1102,10 @@ static bool sf2000_gpio_l_vsync_enabled(void)
 {
     uint32_t ier = 0;
     uint32_t ris_ier = 0;
-    bool have_ier = false;
-    bool have_ris_ier = false;
-    unsigned i;
 
-    for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
-        if (!sf2000_regs[i].valid) {
-            continue;
-        }
-        if (sf2000_regs[i].addr == SF2000_GPIO_L_IER) {
-            ier = sf2000_regs[i].value;
-            have_ier = true;
-        } else if (sf2000_regs[i].addr == SF2000_GPIO_L_RIS_IER) {
-            ris_ier = sf2000_regs[i].value;
-            have_ris_ier = true;
-        }
-    }
-
-    return have_ier && have_ris_ier && (ier & ris_ier & SF2000_GPIO_L08) != 0;
+    sf2000_mmio_get32(SF2000_GPIO_L_IER, &ier);
+    sf2000_mmio_get32(SF2000_GPIO_L_RIS_IER, &ris_ier);
+    return (ier & ris_ier & SF2000_GPIO_L08) != 0;
 }
 
 static bool sf2000_gpio_l_vsync_pending(void)
@@ -1313,6 +1303,18 @@ static bool sf2000_trace_aux(void)
 
     if (trace < 0) {
         const char *env = g_getenv("SF2000_TRACE_AUX");
+
+        trace = env && env[0] && g_strcmp0(env, "0") != 0;
+    }
+    return trace != 0;
+}
+
+static bool sf2000_trace_gma(void)
+{
+    static int trace = -1;
+
+    if (trace < 0) {
+        const char *env = g_getenv("SF2000_TRACE_GMA");
 
         trace = env && env[0] && g_strcmp0(env, "0") != 0;
     }
@@ -3175,7 +3177,7 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
     DisplaySurface *surface;
     uint8_t header[40];
     uint8_t *linebuf;
-    uint8_t palette[1024];
+    uint8_t *linebuf_alloc = NULL;
     bool have_palette = false;
     uint32_t d0, d1, d2, d3, d4, d5, d6, d7, d8, d9;
     uint32_t mode, clut_update, sx, ex, sy, ey, src_w, src_h, pitch;
@@ -3246,12 +3248,16 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
         break;
     case 0x0c: /* CLUT8 */
         bpp = 1;
-        if (clut_update && d1 &&
-            address_space_read(&address_space_memory, d1,
-                               MEMTXATTRS_UNSPECIFIED, palette,
-                               sizeof(palette)) == MEMTX_OK) {
-            have_palette = true;
+        if (d1 && (clut_update || !s->gma_palette_valid ||
+                   s->gma_palette_addr != d1)) {
+            if (address_space_read(&address_space_memory, d1,
+                                   MEMTXATTRS_UNSPECIFIED, s->gma_palette,
+                                   sizeof(s->gma_palette)) == MEMTX_OK) {
+                s->gma_palette_addr = d1;
+                s->gma_palette_valid = true;
+            }
         }
+        have_palette = s->gma_palette_valid && s->gma_palette_addr == d1;
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -3284,7 +3290,12 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
         return d6;
     }
 
-    linebuf = g_malloc(pitch);
+    if (pitch <= sizeof(s->gma_linebuf)) {
+        linebuf = s->gma_linebuf;
+    } else {
+        linebuf_alloc = g_malloc(pitch);
+        linebuf = linebuf_alloc;
+    }
     for (y = 0; y < height; y++) {
         uint32_t *dst = (uint32_t *)(surface_data(surface) +
                         (sy + y) * surface_stride(surface)) + sx;
@@ -3308,14 +3319,14 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
                     ldl_le_p(linebuf + src_x * 4));
             } else if (have_palette) {
                 dst[x] = sf2000_argb8888_to_surface(
-                    ldl_le_p(palette + linebuf[src_x] * 4));
+                    ldl_le_p(s->gma_palette + linebuf[src_x] * 4));
             } else {
                 uint8_t c = linebuf[src_x];
                 dst[x] = 0xff000000u | (c << 16) | (c << 8) | c;
             }
         }
     }
-    g_free(linebuf);
+    g_free(linebuf_alloc);
 
     dpy_gfx_update(s->con, sx, sy, width, height);
     /*
@@ -3327,10 +3338,12 @@ static uint32_t sf2000_gma_present_block(SF2000LCDState *s, uint32_t dmba_addr,
     if (dump_frame) {
         sf2000_dump_ppm_from_surface(s, "gma");
     }
-    qemu_log_mask(LOG_UNIMP,
-                  "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u d0=%08x d1=%08x d2=%08x d3=%08x d4=%08x d5=%08x d6=%08x d8=%08x d9=%08x\n",
-                  dmba_addr, d7, mode, sx, sy, width, height, pitch,
-                  have_palette, d0, d1, d2, d3, d4, d5, d6, d8, d9);
+    if (sf2000_trace_gma()) {
+        qemu_log_mask(LOG_UNIMP,
+                      "sf2000: gma-present dmba=0x%08x bitmap=0x%08x mode=%u rect=%u,%u %ux%u pitch=%u clut=%u d0=%08x d1=%08x d2=%08x d3=%08x d4=%08x d5=%08x d6=%08x d8=%08x d9=%08x\n",
+                      dmba_addr, d7, mode, sx, sy, width, height, pitch,
+                      have_palette, d0, d1, d2, d3, d4, d5, d6, d8, d9);
+    }
     return d6;
 }
 

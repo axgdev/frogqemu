@@ -240,6 +240,14 @@ vnc://host:5901
 
 Logs are written to `build/logs/sf2000.log`.
 
+GMA descriptor tracing is intentionally off for normal interactive runs because
+the stock launcher can present many small blocks per frame. Enable it only when
+researching display descriptors or running the smoke targets:
+
+```sh
+SF2000_TRACE_GMA=1 make run-vnc-vanilla
+```
+
 To boot the stock UI with a generated vanilla SD image, use:
 
 ```sh
