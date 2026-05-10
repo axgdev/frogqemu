@@ -42,7 +42,9 @@ VIDEO_GMA_DUMP_LIMIT ?= 300
 SD_IMAGE ?=
 SD_ARGS = $(if $(SD_IMAGE),-drive if=none,id=sd0,file=$(SD_IMAGE),format=raw,)
 
-.PHONY: all help deps build-info ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-vnc-vanilla run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
+-include config.mk
+
+.PHONY: all help deps build-info check-firmware check-bugfix-firmware check-asd ccache-stats ccache-zero fetch patch configure build vanilla-sd run-vnc run-vnc-vanilla run-headless boot-stock-asd debug capture-stock-ui capture-vanilla-ui capture-vanilla-video smoke smoke-input smoke-stock-bootloader smoke-stock-full smoke-stock-full-bugfix smoke-stock-full-vanilla smoke-stock-full-fat16 smoke-stock-asd smoke-stock-fatfs smoke-stock-display clean distclean
 
 all: build
 
@@ -51,6 +53,7 @@ help:
 		'Targets:' \
 		'  make deps          show required host packages' \
 		'  make build-info    show host/build configuration' \
+		'  make check-firmware verify configured stock firmware paths exist' \
 		'  make ccache-stats  show ccache statistics when ccache is installed' \
 		'  make build         fetch, patch, configure, and build QEMU' \
 		'  make smoke         verify the sf2000 machine exists and firmware loads' \
@@ -95,6 +98,27 @@ build-info:
 	@printf 'firmware: %s\n' '$(FIRMWARE)'
 	@printf 'bugfix firmware: %s\n' '$(FIRMWARE_BUGFIX)'
 	@printf 'asd: %s\n' '$(ASD)'
+
+check-firmware:
+	@test -f '$(FIRMWARE)' || { \
+		printf 'missing FIRMWARE: %s\n' '$(FIRMWARE)' >&2; \
+		printf 'set it with: make <target> FIRMWARE=/path/to/SF2000_XMC_XM25QH40B_4mbit.bin\n' >&2; \
+		exit 1; \
+	}
+
+check-bugfix-firmware:
+	@test -f '$(FIRMWARE_BUGFIX)' || { \
+		printf 'missing FIRMWARE_BUGFIX: %s\n' '$(FIRMWARE_BUGFIX)' >&2; \
+		printf 'set it with: make <target> FIRMWARE_BUGFIX=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin\n' >&2; \
+		exit 1; \
+	}
+
+check-asd:
+	@test -f '$(ASD)' || { \
+		printf 'missing ASD: %s\n' '$(ASD)' >&2; \
+		printf 'set it with: make <target> ASD=/path/to/bisrv_08_03.asd\n' >&2; \
+		exit 1; \
+	}
 
 ccache-stats:
 	@command -v ccache >/dev/null || { printf '%s\n' 'ccache is not installed'; exit 0; }
@@ -171,14 +195,14 @@ $(VANILLA_SD_IMAGE): $(VANILLA_DIR)/.extracted
 
 vanilla-sd: $(VANILLA_SD_IMAGE)
 
-run-vnc: build
+run-vnc: build check-firmware
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
 		-display vnc=$(VNC) \
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
-run-vnc-vanilla: build $(VANILLA_SD_IMAGE)
+run-vnc-vanilla: build check-bugfix-firmware $(VANILLA_SD_IMAGE)
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE_BUGFIX) \
 		-drive if=none,id=sd0,file=$(VANILLA_SD_IMAGE),format=raw \
@@ -186,13 +210,13 @@ run-vnc-vanilla: build $(VANILLA_SD_IMAGE)
 		-serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
-run-headless: build
+run-headless: build check-firmware
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) $(SD_ARGS) \
 		-display none -serial none -monitor stdio \
 		-d guest_errors,unimp -D $(LOG)
 
-boot-stock-asd: build
+boot-stock-asd: build check-firmware check-asd
 	mkdir -p $(dir $(LOG))
 	$(QEMU_BIN) -M sf2000 -bios $(FIRMWARE) -kernel $(ASD) $(SD_ARGS) \
 		-display vnc=$(VNC) \

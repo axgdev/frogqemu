@@ -131,10 +131,20 @@ The default firmware path is:
 /root/host-frogdev/universal/orig_firmware/SF2000_XMC_XM25QH40B_4mbit.bin
 ```
 
-Override it with:
+That path is only correct on the original development machine. On Fedora,
+either keep a local `config.mk` with your paths or pass them on the command
+line. The vanilla VNC target needs the bugfixed bootloader:
 
 ```sh
-make smoke FIRMWARE=/path/to/firmware.bin
+make run-vnc-vanilla FIRMWARE_BUGFIX=/path/to/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+```
+
+A local untracked `config.mk` is the easiest repeatable setup:
+
+```make
+FIRMWARE_BUGFIX := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit_bugfix.bin
+FIRMWARE := /home/me/firmware/SF2000_XMC_XM25QH40B_4mbit.bin
+ASD := /home/me/firmware/bisrv_08_03.asd
 ```
 
 The stock ASD path defaults to:
@@ -212,6 +222,10 @@ To boot the stock UI with a generated vanilla SD image, use:
 ```sh
 make run-vnc-vanilla
 ```
+
+Do not use `make -n` when you want to start the emulator. `-n` is Make's
+dry-run mode; it prints every command that would run, but does not download,
+build, create the SD image, or launch QEMU.
 
 This target downloads the public vanilla SF2000 OS files, creates
 `build/sf2000-vanilla.sd.img`, boots the bugfixed stock bootloader, and exposes
