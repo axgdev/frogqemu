@@ -96,6 +96,19 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_UART_IIR_THRI   0x02
 #define SF2000_UART_LSR_THRE   BIT(5)
 #define SF2000_UART_LSR_TEMT   BIT(6)
+#define SF2000_I2C0_BASE       0x18818200ULL
+#define SF2000_I2C1_BASE       0x18818700ULL
+#define SF2000_I2C_SIZE        0x00000040ULL
+#define SF2000_I2C_HCR         0x00
+#define SF2000_I2C_HSR         0x01
+#define SF2000_I2C_IER         0x02
+#define SF2000_I2C_ISR         0x03
+#define SF2000_I2C_DATA        0x10
+#define SF2000_I2C_IER1        0x20
+#define SF2000_I2C_ISR1        0x21
+#define SF2000_I2C_HCR_ST      BIT(0)
+#define SF2000_I2C_ISR_TDI     BIT(0)
+#define SF2000_I2C_ISR1_FT     BIT(0)
 #define SF2000_ADC_BASE        0x18818400ULL
 #define SF2000_ADC_SIZE        0x00000100ULL
 #define SF2000_ADC_SAMPLE      200
@@ -134,8 +147,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
                                 SF2000_TIMER5_INDEX * SF2000_TIMER_STEP)
 #define SF2000_SB_TIMER_BIT    22
 #define SF2000_SB_TIMER_IRQ    (1u << SF2000_SB_TIMER_BIT)
+#define SF2000_UART0_IRQ_BIT   16
+#define SF2000_UART0_IRQ       (1u << SF2000_UART0_IRQ_BIT)
 #define SF2000_UART1_IRQ_BIT   17
 #define SF2000_UART1_IRQ       (1u << SF2000_UART1_IRQ_BIT)
+#define SF2000_I2C0_IRQ_BIT    18
+#define SF2000_I2C0_IRQ        (1u << SF2000_I2C0_IRQ_BIT)
+#define SF2000_I2C1_IRQ_BIT    25
+#define SF2000_I2C1_IRQ        (1u << SF2000_I2C1_IRQ_BIT)
 #define SF2000_SDIO_IRQ_BIT    10
 #define SF2000_SDIO_IRQ        (1u << SF2000_SDIO_IRQ_BIT)
 #define SF2000_AUX_BASE        0x1880f000ULL
@@ -301,6 +320,11 @@ static char sf2000_uart_line[2][256];
 static uint32_t sf2000_uart_line_len[2];
 static uint8_t sf2000_uart_ier[2];
 static bool sf2000_uart_thri_pending[2];
+static uint8_t sf2000_i2c_ier[2];
+static uint8_t sf2000_i2c_isr[2];
+static uint8_t sf2000_i2c_ier1[2];
+static uint8_t sf2000_i2c_isr1[2];
+static uint8_t sf2000_i2c_data[2];
 static uint32_t sf2000_key_mask;
 static unsigned sf2000_key_shift_index;
 static uint32_t sf2000_gpio_l_out;
@@ -725,6 +749,35 @@ static bool sf2000_uart_irq_pending(unsigned index)
            (sf2000_uart_ier[index] & SF2000_UART_IER_THRI) != 0;
 }
 
+static bool sf2000_i2c_decode(hwaddr full_addr, unsigned *index,
+                              unsigned *offset)
+{
+    if (full_addr >= SF2000_I2C0_BASE &&
+        full_addr < SF2000_I2C0_BASE + SF2000_I2C_SIZE) {
+        *index = 0;
+        *offset = full_addr - SF2000_I2C0_BASE;
+        return true;
+    }
+    if (full_addr >= SF2000_I2C1_BASE &&
+        full_addr < SF2000_I2C1_BASE + SF2000_I2C_SIZE) {
+        *index = 1;
+        *offset = full_addr - SF2000_I2C1_BASE;
+        return true;
+    }
+    return false;
+}
+
+static uint32_t sf2000_i2c_irq_mask(unsigned index)
+{
+    return index == 0 ? SF2000_I2C0_IRQ : SF2000_I2C1_IRQ;
+}
+
+static bool sf2000_i2c_irq_pending(unsigned index)
+{
+    return ((sf2000_i2c_isr[index] & sf2000_i2c_ier[index]) != 0) ||
+           ((sf2000_i2c_isr1[index] & sf2000_i2c_ier1[index]) != 0);
+}
+
 static bool sf2000_gpio_l_vsync_enabled(void)
 {
     uint32_t ier = 0;
@@ -881,8 +934,14 @@ static void sf2000_update_irq(void)
     qemu_set_irq(sf2000_eirq3,
                  (sf2000_gpio_l_vsync_pending() &&
                   sf2000_irq1_enabled(SF2000_GPIO_IRQ)) ||
+                 (sf2000_uart_irq_pending(0) &&
+                  sf2000_irq1_enabled(SF2000_UART0_IRQ)) ||
                  (sf2000_uart_irq_pending(1) &&
                   sf2000_irq1_enabled(SF2000_UART1_IRQ)) ||
+                 (sf2000_i2c_irq_pending(0) &&
+                  sf2000_irq1_enabled(SF2000_I2C0_IRQ)) ||
+                 (sf2000_i2c_irq_pending(1) &&
+                  sf2000_irq1_enabled(SF2000_I2C1_IRQ)) ||
                  (sf2000_sb_timer_pending() && !sf2000_sb_timer_irq_masked) ||
                  (sf2000_sdio_irq_pending &&
                   sf2000_irq1_enabled(SF2000_SDIO_IRQ)));
@@ -976,6 +1035,10 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
          addr < SF2000_UART0_BASE + SF2000_UART_SIZE) ||
         (addr >= SF2000_UART1_BASE &&
          addr < SF2000_UART1_BASE + SF2000_UART_SIZE) ||
+        (addr >= SF2000_I2C0_BASE &&
+         addr < SF2000_I2C0_BASE + SF2000_I2C_SIZE) ||
+        (addr >= SF2000_I2C1_BASE &&
+         addr < SF2000_I2C1_BASE + SF2000_I2C_SIZE) ||
         (addr == SF2000_MSYSIO_BASE && g_str_equal(kind, "mmio-read")) ||
         (addr >= SF2000_AVPHY_BASE &&
          addr < SF2000_AVPHY_BASE + SF2000_AVPHY_SIZE) ||
@@ -1330,6 +1393,93 @@ static uint64_t sf2000_adc_read(hwaddr full_addr, unsigned size)
         value &= (1u << (size * 8)) - 1u;
     }
     return value;
+}
+
+static uint64_t sf2000_i2c_read(hwaddr full_addr, unsigned size)
+{
+    unsigned index;
+    unsigned offset;
+    uint32_t value = 0;
+
+    if (!sf2000_i2c_decode(full_addr, &index, &offset)) {
+        return 0;
+    }
+
+    switch (offset) {
+    case SF2000_I2C_HSR:
+        /*
+         * The HC I2C driver polls for host-busy/device-busy clear and FIFO
+         * not-full. A zero status is the idle, ready state for write
+         * transfers and avoids inventing a device-specific slave response.
+         */
+        value = 0;
+        break;
+    case SF2000_I2C_IER:
+        value = sf2000_i2c_ier[index];
+        break;
+    case SF2000_I2C_ISR:
+        value = sf2000_i2c_isr[index];
+        break;
+    case SF2000_I2C_DATA:
+        value = sf2000_i2c_data[index];
+        break;
+    case SF2000_I2C_IER1:
+        value = sf2000_i2c_ier1[index];
+        break;
+    case SF2000_I2C_ISR1:
+        value = sf2000_i2c_isr1[index];
+        break;
+    default:
+        sf2000_mmio_get32(full_addr, &value);
+        value >>= ((full_addr & 3u) * 8u);
+        break;
+    }
+
+    if (size < 4) {
+        value &= (1u << (size * 8)) - 1u;
+    }
+    return value;
+}
+
+static void sf2000_i2c_write(hwaddr full_addr, uint64_t value)
+{
+    unsigned index;
+    unsigned offset;
+
+    if (!sf2000_i2c_decode(full_addr, &index, &offset)) {
+        return;
+    }
+
+    switch (offset) {
+    case SF2000_I2C_HCR:
+        if (value & SF2000_I2C_HCR_ST) {
+            /*
+             * Model an immediate, successful host-controller transaction. The
+             * real block moves bytes through its FIFO and raises TDI; open
+             * drivers care first that the transfer contract does not timeout.
+             */
+            sf2000_i2c_isr[index] |= SF2000_I2C_ISR_TDI;
+            sf2000_i2c_isr1[index] |= SF2000_I2C_ISR1_FT;
+        }
+        break;
+    case SF2000_I2C_IER:
+        sf2000_i2c_ier[index] = value & 0xff;
+        break;
+    case SF2000_I2C_ISR:
+        sf2000_i2c_isr[index] &= ~(value & 0xff);
+        break;
+    case SF2000_I2C_DATA:
+        sf2000_i2c_data[index] = value & 0xff;
+        break;
+    case SF2000_I2C_IER1:
+        sf2000_i2c_ier1[index] = value & 0xff;
+        break;
+    case SF2000_I2C_ISR1:
+        sf2000_i2c_isr1[index] &= ~(value & 0xff);
+        break;
+    default:
+        break;
+    }
 }
 
 static bool sf2000_wdt_decode(hwaddr full_addr)
@@ -1977,6 +2127,7 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     unsigned timer_offset;
     unsigned uart_index;
     unsigned uart_offset;
+    unsigned i2c_index;
     unsigned i;
 
     if (full_addr == SF2000_IRQ_STATUS1) {
@@ -1987,8 +2138,16 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         if (gpio_vsync_pending) {
             value |= SF2000_GPIO_IRQ;
         }
+        if (sf2000_uart_irq_pending(0)) {
+            value |= SF2000_UART0_IRQ;
+        }
         if (sf2000_uart_irq_pending(1)) {
             value |= SF2000_UART1_IRQ;
+        }
+        for (i2c_index = 0; i2c_index < 2; i2c_index++) {
+            if (sf2000_i2c_irq_pending(i2c_index)) {
+                value |= sf2000_i2c_irq_mask(i2c_index);
+            }
         }
         if (sf2000_sdio_irq_pending) {
             value |= SF2000_SDIO_IRQ;
@@ -2061,6 +2220,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     } else if (sf2000_uart_decode(full_addr, &uart_index, &uart_offset) &&
                uart_offset == SF2000_UART_LSR) {
         value = SF2000_UART_LSR_THRE | SF2000_UART_LSR_TEMT;
+    } else if (sf2000_i2c_decode(full_addr, &i2c_index, &uart_offset)) {
+        value = sf2000_i2c_read(full_addr, size);
     } else if (full_addr >= SF2000_ADC_BASE &&
                full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
         value = sf2000_adc_read(full_addr, size);
@@ -2182,6 +2343,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     unsigned adc_offset;
     unsigned uart_index;
     unsigned uart_offset;
+    unsigned i2c_index;
+    unsigned i2c_offset;
     unsigned i;
 
     for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -2296,6 +2459,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         if (sf2000_uart_ier[uart_index] & SF2000_UART_IER_THRI) {
             sf2000_uart_thri_pending[uart_index] = true;
         }
+    } else if (sf2000_i2c_decode(full_addr, &i2c_index, &i2c_offset)) {
+        sf2000_i2c_write(full_addr, value);
     } else if (full_addr == 0x1882e098) {
         sf2000_sflash_cmd = value & 0xff;
         if (sf2000_trace_sflash()) {
