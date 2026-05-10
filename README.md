@@ -40,6 +40,20 @@ sudo apt-get install build-essential curl meson ninja-build patch pkg-config \
   dosfstools mtools unzip imagemagick ffmpeg
 ```
 
+On Fedora, use Samurai instead of Ninja if you prefer the smaller
+Ninja-compatible executor:
+
+```sh
+sudo dnf install gcc make curl meson samurai patch pkgconf-pkg-config \
+  glib2-devel pixman-devel python3-pip ccache
+```
+
+Optional Fedora tools for generated SD-card images and captures:
+
+```sh
+sudo dnf install dosfstools mtools unzip ImageMagick ffmpeg
+```
+
 The debug target expects the project toolchain GDB at:
 
 ```sh
