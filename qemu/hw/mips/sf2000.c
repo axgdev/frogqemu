@@ -109,6 +109,17 @@ OBJECT_DECLARE_SIMPLE_TYPE(SF2000LCDState, SF2000_LCD)
 #define SF2000_I2C_HCR_ST      BIT(0)
 #define SF2000_I2C_ISR_TDI     BIT(0)
 #define SF2000_I2C_ISR1_FT     BIT(0)
+#define SF2000_PWM_BASE        0x18818410ULL
+#define SF2000_PWM_SIZE        0x00000040ULL
+#define SF2000_PWM_CLK_CTRL    0x00
+#define SF2000_PWM_DIV_BASE    0x04
+#define SF2000_PWM_CHANNELS    6
+#define SF2000_PWM_CH_STRIDE   0x08
+#define SF2000_PWM_CLKSEL_MASK 0x3fff0000u
+#define SF2000_PWM_CLKEN       BIT(30)
+#define SF2000_PWM_ENABLE      BIT(31)
+#define SF2000_PWM_POLARITY    BIT(36 - 32)
+#define SF2000_PWM_CH_ENABLE   BIT(39 - 32)
 #define SF2000_ADC_BASE        0x18818400ULL
 #define SF2000_ADC_SIZE        0x00000100ULL
 #define SF2000_ADC_SAMPLE      200
@@ -291,6 +302,13 @@ typedef struct SF2000RegState {
     bool valid;
 } SF2000RegState;
 
+typedef struct SF2000PWMChannel {
+    uint16_t low_count;
+    uint16_t high_count;
+    bool polarity;
+    bool enabled;
+} SF2000PWMChannel;
+
 static SF2000RegState sf2000_regs[256];
 static qemu_irq sf2000_eirq3;
 static uint32_t sf2000_timer_cnt[SF2000_TIMER_COUNT];
@@ -325,6 +343,8 @@ static uint8_t sf2000_i2c_isr[2];
 static uint8_t sf2000_i2c_ier1[2];
 static uint8_t sf2000_i2c_isr1[2];
 static uint8_t sf2000_i2c_data[2];
+static uint32_t sf2000_pwm_clk_ctrl;
+static SF2000PWMChannel sf2000_pwm_channel[SF2000_PWM_CHANNELS];
 static uint32_t sf2000_key_mask;
 static unsigned sf2000_key_shift_index;
 static uint32_t sf2000_gpio_l_out;
@@ -778,6 +798,67 @@ static bool sf2000_i2c_irq_pending(unsigned index)
            ((sf2000_i2c_isr1[index] & sf2000_i2c_ier1[index]) != 0);
 }
 
+static bool sf2000_pwm_decode(hwaddr full_addr, unsigned *channel,
+                              unsigned *offset)
+{
+    hwaddr pwm_off;
+
+    if (full_addr < SF2000_PWM_BASE ||
+        full_addr >= SF2000_PWM_BASE + SF2000_PWM_SIZE) {
+        return false;
+    }
+
+    pwm_off = full_addr - SF2000_PWM_BASE;
+    if (pwm_off < SF2000_PWM_DIV_BASE) {
+        *channel = SF2000_PWM_CHANNELS;
+        *offset = pwm_off;
+        return true;
+    }
+
+    pwm_off -= SF2000_PWM_DIV_BASE;
+    *channel = pwm_off / SF2000_PWM_CH_STRIDE;
+    *offset = pwm_off % SF2000_PWM_CH_STRIDE;
+    return *channel < SF2000_PWM_CHANNELS;
+}
+
+static void sf2000_pwm_refresh_channel(unsigned channel)
+{
+    uint32_t counters = 0;
+    uint32_t control = 0;
+
+    if (channel >= SF2000_PWM_CHANNELS) {
+        return;
+    }
+
+    sf2000_mmio_get32(SF2000_PWM_BASE + SF2000_PWM_DIV_BASE +
+                      channel * SF2000_PWM_CH_STRIDE, &counters);
+    sf2000_mmio_get32(SF2000_PWM_BASE + SF2000_PWM_DIV_BASE +
+                      channel * SF2000_PWM_CH_STRIDE + 4, &control);
+
+    sf2000_pwm_channel[channel].low_count = counters & 0xffffu;
+    sf2000_pwm_channel[channel].high_count = counters >> 16;
+    sf2000_pwm_channel[channel].polarity = (control & SF2000_PWM_POLARITY) != 0;
+    sf2000_pwm_channel[channel].enabled = (control & SF2000_PWM_CH_ENABLE) != 0;
+}
+
+static void sf2000_pwm_write(hwaddr full_addr)
+{
+    unsigned channel;
+    unsigned offset;
+
+    if (!sf2000_pwm_decode(full_addr, &channel, &offset)) {
+        return;
+    }
+
+    if (channel == SF2000_PWM_CHANNELS) {
+        sf2000_mmio_get32(SF2000_PWM_BASE + SF2000_PWM_CLK_CTRL,
+                          &sf2000_pwm_clk_ctrl);
+        return;
+    }
+
+    sf2000_pwm_refresh_channel(channel);
+}
+
 static bool sf2000_gpio_l_vsync_enabled(void)
 {
     uint32_t ier = 0;
@@ -1039,6 +1120,8 @@ static void sf2000_log_mmio(const char *kind, hwaddr addr, uint64_t value,
          addr < SF2000_I2C0_BASE + SF2000_I2C_SIZE) ||
         (addr >= SF2000_I2C1_BASE &&
          addr < SF2000_I2C1_BASE + SF2000_I2C_SIZE) ||
+        (addr >= SF2000_PWM_BASE &&
+         addr < SF2000_PWM_BASE + SF2000_PWM_SIZE) ||
         (addr == SF2000_MSYSIO_BASE && g_str_equal(kind, "mmio-read")) ||
         (addr >= SF2000_AVPHY_BASE &&
          addr < SF2000_AVPHY_BASE + SF2000_AVPHY_SIZE) ||
@@ -2128,6 +2211,8 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
     unsigned uart_index;
     unsigned uart_offset;
     unsigned i2c_index;
+    unsigned pwm_channel;
+    unsigned pwm_offset;
     unsigned i;
 
     if (full_addr == SF2000_IRQ_STATUS1) {
@@ -2222,6 +2307,14 @@ static uint64_t sf2000_unimp_read(void *opaque, hwaddr addr, unsigned size)
         value = SF2000_UART_LSR_THRE | SF2000_UART_LSR_TEMT;
     } else if (sf2000_i2c_decode(full_addr, &i2c_index, &uart_offset)) {
         value = sf2000_i2c_read(full_addr, size);
+    } else if (sf2000_pwm_decode(full_addr, &pwm_channel, &pwm_offset)) {
+        uint32_t pwm_value = 0;
+
+        sf2000_mmio_get32(full_addr, &pwm_value);
+        value = pwm_value >> ((full_addr & 3u) * 8u);
+        if (size < 4) {
+            value &= (1u << (size * 8)) - 1u;
+        }
     } else if (full_addr >= SF2000_ADC_BASE &&
                full_addr < SF2000_ADC_BASE + SF2000_ADC_SIZE) {
         value = sf2000_adc_read(full_addr, size);
@@ -2345,6 +2438,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
     unsigned uart_offset;
     unsigned i2c_index;
     unsigned i2c_offset;
+    unsigned pwm_channel;
+    unsigned pwm_offset;
     unsigned i;
 
     for (i = 0; i < ARRAY_SIZE(sf2000_regs); i++) {
@@ -2461,6 +2556,8 @@ static void sf2000_unimp_write(void *opaque, hwaddr addr, uint64_t value,
         }
     } else if (sf2000_i2c_decode(full_addr, &i2c_index, &i2c_offset)) {
         sf2000_i2c_write(full_addr, value);
+    } else if (sf2000_pwm_decode(full_addr, &pwm_channel, &pwm_offset)) {
+        sf2000_pwm_write(full_addr);
     } else if (full_addr == 0x1882e098) {
         sf2000_sflash_cmd = value & 0xff;
         if (sf2000_trace_sflash()) {
